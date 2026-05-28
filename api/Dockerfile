@@ -20,4 +20,4 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/prisma ./prisma
 COPY package.json ./
 EXPOSE 4000
-CMD ["sh", "-c", "npx prisma db push --skip-generate --accept-data-loss && node dist/index.js"]
+CMD ["sh", "-c", "echo '===== DOCKERFILE CMD STARTING =====' && echo 'PORT env='$PORT && echo 'NODE_ENV='$NODE_ENV && echo 'API_PORT='$API_PORT && echo '===== running db push =====' && npx prisma db push --skip-generate --accept-data-loss && echo '===== db push done, launching node =====' && node dist/index.js ; echo '===== NODE EXITED (code='$?') ====='"]
