@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { use, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -42,8 +42,9 @@ import { cn, formatTime } from "@/lib/utils";
 
 type Tab = "queue" | "chat" | "lyrics" | "people";
 
-export default function RoomPage({ params }: { params: { id: string } }) {
-  const room = getRoom(params.id);
+export default function RoomPage({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = use(params);
+  const room = getRoom(id);
   const track = getTrack(room.trackId);
   const host = getUser(room.hostId);
 
