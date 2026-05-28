@@ -47,8 +47,7 @@ app.use(errorHandler);
 // Socket.IO — handles all real-time room sync, chat, reactions, presence.
 initSocketServer(server);
 
-const port = Number(process.env.PORT) || env.API_PORT;
-server.listen(port, "0.0.0.0", () => {
+server.listen(env.API_PORT, "0.0.0.0", () => {
   // eslint-disable-next-line no-console
-  console.log(`✨ VibeTogether API listening on :${port}`);
+  console.log(`✨ VibeTogether API listening on :${env.API_PORT}`);
 });
