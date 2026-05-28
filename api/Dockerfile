@@ -5,7 +5,8 @@ ENV NODE_ENV=production
 
 FROM base AS deps
 COPY package.json ./
-RUN npm install --omit=dev
+COPY prisma ./prisma
+RUN npm install --omit=dev && npx prisma generate
 
 FROM base AS build
 ENV NODE_ENV=development
