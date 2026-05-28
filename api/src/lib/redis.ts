@@ -5,6 +5,7 @@ import { env } from "./env.js";
 export const redisPub = new Redis(env.REDIS_URL, {
   maxRetriesPerRequest: null,
   enableReadyCheck: false,
+  lazyConnect: true,
 });
 
 export const redisSub = redisPub.duplicate();
