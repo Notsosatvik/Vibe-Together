@@ -7,8 +7,9 @@ COPY package.json ./
 RUN npm install --omit=dev
 
 FROM base AS build
+ENV NODE_ENV=development
 COPY package.json ./
-RUN npm install
+RUN npm install --include=dev
 COPY . .
 RUN npx prisma generate && npm run build
 
