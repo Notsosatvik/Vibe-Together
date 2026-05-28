@@ -1,0 +1,37 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: vibe-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: vibe
+      POSTGRES_PASSWORD: vibe
+      POSTGRES_DB: vibetogether
+    ports:
+      - "5432:5432"
+    volumes:
+      - vibe-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vibe -d vibetogether"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: vibe-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - vibe-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  vibe-pg:
+  vibe-redis:

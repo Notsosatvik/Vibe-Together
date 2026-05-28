@@ -1,0 +1,228 @@
+// VibeTogether — Prisma schema
+//
+// `npx prisma migrate dev --name init` once DATABASE_URL is set.
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["fullTextSearch"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =========================================
+// Users / Auth
+// =========================================
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  handle       String   @unique
+  avatarUrl    String?
+  avatarColor  String?  // tailwind gradient name for our generated avatars
+  bio          String?
+
+  googleId     String?  @unique
+  spotifyId    String?  @unique
+  spotifyAccessToken  String?
+  spotifyRefreshToken String?
+  spotifyTokenExpiry  DateTime?
+  spotifyProduct      String?  // "premium" | "free"
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  lastSeenAt   DateTime @default(now())
+
+  // Relations
+  hostedRooms  Room[]            @relation("HostedRooms")
+  participants RoomParticipant[]
+  messages     ChatMessage[]
+  reactions    Reaction[]
+  queueItems   QueueItem[]
+  followers    Follow[]          @relation("Followee")
+  following    Follow[]          @relation("Follower")
+  refreshTokens RefreshToken[]
+  badges       UserBadge[]
+  sessions     ListeningSession[]
+
+  @@index([handle])
+  @@index([email])
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  hash      String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  revokedAt DateTime?
+
+  @@index([userId])
+}
+
+model Follow {
+  followerId String
+  followeeId String
+  follower   User   @relation("Follower", fields: [followerId], references: [id], onDelete: Cascade)
+  followee   User   @relation("Followee", fields: [followeeId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+
+  @@id([followerId, followeeId])
+}
+
+// =========================================
+// Rooms
+// =========================================
+enum RoomPrivacy {
+  PUBLIC
+  FRIENDS
+  PRIVATE
+}
+
+model Room {
+  id          String      @id @default(cuid())
+  code        String      @unique // short invite code, e.g. "VIBE-XYZ"
+  name        String
+  vibe        String?
+  genre       String?
+  privacy     RoomPrivacy @default(PUBLIC)
+  themeColor1 String?
+  themeColor2 String?
+
+  hostId      String
+  host        User        @relation("HostedRooms", fields: [hostId], references: [id])
+
+  currentTrackId   String?
+  currentTrackUri  String?
+  currentPositionMs Int    @default(0)
+  isPlaying        Boolean @default(false)
+  // Server-authoritative timestamp of the last sync update.
+  // Clients reconcile by computing: position = currentPositionMs + (now - lastSyncAt)
+  lastSyncAt       DateTime @default(now())
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  closedAt    DateTime?
+
+  participants RoomParticipant[]
+  messages     ChatMessage[]
+  reactions    Reaction[]
+  queueItems   QueueItem[]
+  sessions     ListeningSession[]
+
+  @@index([privacy, createdAt])
+}
+
+enum RoomRole {
+  HOST
+  COHOST
+  LISTENER
+}
+
+model RoomParticipant {
+  id        String   @id @default(cuid())
+  roomId    String
+  room      Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      RoomRole @default(LISTENER)
+  joinedAt  DateTime @default(now())
+  leftAt    DateTime?
+
+  @@unique([roomId, userId])
+  @@index([userId])
+}
+
+// =========================================
+// Chat / Reactions / Queue
+// =========================================
+model ChatMessage {
+  id        String   @id @default(cuid())
+  roomId    String
+  room      Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  text      String   @db.VarChar(2000)
+  createdAt DateTime @default(now())
+
+  @@index([roomId, createdAt])
+}
+
+model Reaction {
+  id        String   @id @default(cuid())
+  roomId    String
+  room      Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  emoji     String
+  // The track position at which the reaction was fired — used for replay.
+  atMs      Int
+  createdAt DateTime @default(now())
+
+  @@index([roomId, createdAt])
+}
+
+model QueueItem {
+  id          String   @id @default(cuid())
+  roomId      String
+  room        Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  trackUri    String   // spotify:track:xxxx
+  trackName   String
+  artistName  String
+  albumName   String
+  albumArtUrl String?
+  durationMs  Int
+  addedById   String
+  addedBy     User     @relation(fields: [addedById], references: [id])
+  position    Int      // ordering
+  votes       Int      @default(0)
+  playedAt    DateTime?
+  createdAt   DateTime @default(now())
+
+  @@index([roomId, position])
+}
+
+// =========================================
+// Listening history / stats
+// =========================================
+model ListeningSession {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  roomId    String?
+  room      Room?    @relation(fields: [roomId], references: [id])
+  trackUri  String
+  trackName String
+  artistName String
+  startedAt DateTime @default(now())
+  endedAt   DateTime?
+  durationMs Int?
+
+  @@index([userId, startedAt])
+}
+
+// =========================================
+// Badges / achievements
+// =========================================
+model Badge {
+  id          String      @id @default(cuid())
+  slug        String      @unique
+  name        String
+  description String
+  icon        String      // lucide icon name
+  rarity      String      // "common" | "rare" | "epic" | "legendary"
+  users       UserBadge[]
+}
+
+model UserBadge {
+  userId   String
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  badgeId  String
+  badge    Badge  @relation(fields: [badgeId], references: [id], onDelete: Cascade)
+  earnedAt DateTime @default(now())
+
+  @@id([userId, badgeId])
+}
