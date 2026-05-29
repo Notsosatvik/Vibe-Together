@@ -2,18 +2,14 @@
 
 import Link from "next/link";
 import { motion } from "framer-motion";
-import { useRouter } from "next/navigation";
 import { GlassCard } from "@/components/ui/glass-card";
-import { Button } from "@/components/ui/button";
 import { Visualizer } from "@/components/shared/visualizer";
 import { AlbumArt } from "@/components/shared/album-art";
 import { mockTracks } from "@/lib/mock-data";
+import { startGoogleLogin } from "@/lib/api";
 
 export default function LoginPage() {
-  const router = useRouter();
-
-  // In production: window.location.href = `${API_URL}/auth/google?redirect=/onboarding`
-  const startGoogle = () => router.push("/onboarding");
+  const startGoogle = () => startGoogleLogin();
 
   return (
     <div className="grid w-full max-w-5xl gap-10 lg:grid-cols-2 items-center">

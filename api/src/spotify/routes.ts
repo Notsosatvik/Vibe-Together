@@ -6,6 +6,14 @@ import { requireAuth } from "../middleware/auth.js";
 
 export const spotifyRouter = Router();
 
+const isProd = env.NODE_ENV === "production";
+const crossSiteCookie = {
+  httpOnly: true as const,
+  sameSite: (isProd ? "none" : "lax") as "none" | "lax",
+  secure: isProd,
+  path: "/",
+};
+
 const SPOTIFY_SCOPES = [
   "streaming",
   "user-read-email",
@@ -26,7 +34,7 @@ spotifyRouter.get("/connect", requireAuth, (req, res) => {
   const state = crypto.randomBytes(16).toString("hex");
   // Encode our user id in the state so the callback can look up the right account.
   const encoded = `${state}:${req.user!.sub}`;
-  res.cookie("spotify_state", state, { httpOnly: true, sameSite: "lax", maxAge: 5 * 60 * 1000 });
+  res.cookie("spotify_state", state, { ...crossSiteCookie, maxAge: 5 * 60 * 1000 });
   const params = new URLSearchParams({
     client_id: env.SPOTIFY_CLIENT_ID,
     response_type: "code",
@@ -84,7 +92,8 @@ spotifyRouter.get("/callback", async (req, res, next) => {
       },
     });
 
-    res.redirect(`${env.WEB_ORIGIN}/dashboard`);
+    res.clearCookie("spotify_state", { ...crossSiteCookie });
+    res.redirect(`${env.WEB_ORIGIN}/dashboard?spotify=connected`);
   } catch (err) {
     next(err);
   }

@@ -16,12 +16,22 @@ export const authRouter = Router();
 //   2. Google redirects → GET /auth/google/callback?code=...
 //   3. Exchange code → user info → upsert User → set HttpOnly cookies → 302 to web app
 //
+// In production the API (railway.app) and web (vercel.app) are different sites,
+// so cookies need SameSite=None;Secure to be sent on cross-site fetch.
+const isProd = env.NODE_ENV === "production";
+const crossSiteCookie = {
+  httpOnly: true as const,
+  sameSite: (isProd ? "none" : "lax") as "none" | "lax",
+  secure: isProd,
+  path: "/",
+};
+
 authRouter.get("/google", (req, res) => {
   if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_REDIRECT_URI) {
     return res.status(500).json({ error: "Google OAuth not configured" });
   }
   const state = crypto.randomBytes(16).toString("hex");
-  res.cookie("oauth_state", state, { httpOnly: true, sameSite: "lax", maxAge: 5 * 60 * 1000 });
+  res.cookie("oauth_state", state, { ...crossSiteCookie, maxAge: 5 * 60 * 1000 });
 
   const params = new URLSearchParams({
     client_id: env.GOOGLE_CLIENT_ID,
@@ -102,14 +112,9 @@ authRouter.get("/google/callback", async (req, res, next) => {
       },
     });
 
-    const cookieBase = {
-      httpOnly: true as const,
-      sameSite: "lax" as const,
-      secure: env.NODE_ENV === "production",
-      path: "/",
-    };
-    res.cookie("access_token", accessToken, { ...cookieBase, maxAge: 15 * 60 * 1000 });
-    res.cookie("refresh_token", refreshToken, { ...cookieBase, maxAge: 30 * 24 * 60 * 60 * 1000 });
+    res.cookie("access_token", accessToken, { ...crossSiteCookie, maxAge: 15 * 60 * 1000 });
+    res.cookie("refresh_token", refreshToken, { ...crossSiteCookie, maxAge: 30 * 24 * 60 * 60 * 1000 });
+    res.clearCookie("oauth_state", { ...crossSiteCookie });
 
     // If user hasn't connected Spotify, send them to onboarding
     const dest = user.spotifyId ? "/dashboard" : "/onboarding";
@@ -154,14 +159,8 @@ authRouter.post("/refresh", async (req, res, next) => {
       handle: user.handle,
     });
 
-    const cookieBase = {
-      httpOnly: true as const,
-      sameSite: "lax" as const,
-      secure: env.NODE_ENV === "production",
-      path: "/",
-    };
-    res.cookie("access_token", access, { ...cookieBase, maxAge: 15 * 60 * 1000 });
-    res.cookie("refresh_token", newRefresh, { ...cookieBase, maxAge: 30 * 24 * 60 * 60 * 1000 });
+    res.cookie("access_token", access, { ...crossSiteCookie, maxAge: 15 * 60 * 1000 });
+    res.cookie("refresh_token", newRefresh, { ...crossSiteCookie, maxAge: 30 * 24 * 60 * 60 * 1000 });
 
     res.json({ ok: true });
   } catch (err) {
@@ -177,7 +176,7 @@ authRouter.post("/logout", async (req, res) => {
       .update({ where: { hash }, data: { revokedAt: new Date() } })
       .catch(() => {});
   }
-  res.clearCookie("access_token");
-  res.clearCookie("refresh_token");
+  res.clearCookie("access_token", { ...crossSiteCookie });
+  res.clearCookie("refresh_token", { ...crossSiteCookie });
   res.json({ ok: true });
 });

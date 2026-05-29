@@ -1,12 +1,30 @@
 "use client";
 
 import { Search, Bell, Inbox } from "lucide-react";
+import { useUserStore } from "@/lib/store/user";
 
-export function TopBar({ title, subtitle }: { title: string; subtitle?: string }) {
+export function TopBar({
+  title,
+  subtitle,
+  greeting,
+}: {
+  /** Either a fixed title, OR pass `greeting` for a "Good evening, {name}" line. */
+  title?: string;
+  subtitle?: string;
+  greeting?: boolean;
+}) {
+  const user = useUserStore((s) => s.user);
+
+  const computedTitle = greeting
+    ? `${timeOfDayGreeting()}, ${firstName(user?.name)}`
+    : title ?? "";
+
   return (
     <header className="sticky top-0 z-30 flex items-center justify-between gap-4 backdrop-blur-xl bg-ink-950/60 border-b border-white/8 px-6 lg:px-8 py-4">
       <div>
-        <div className="font-display text-2xl font-semibold tracking-tight">{title}</div>
+        <div className="font-display text-2xl font-semibold tracking-tight">
+          {computedTitle}
+        </div>
         {subtitle && <div className="text-xs text-white/50 mt-0.5">{subtitle}</div>}
       </div>
       <div className="flex items-center gap-2">
@@ -28,4 +46,17 @@ export function TopBar({ title, subtitle }: { title: string; subtitle?: string }
       </div>
     </header>
   );
+}
+
+function firstName(full?: string | null) {
+  if (!full) return "there";
+  return full.split(" ")[0] ?? full;
+}
+
+function timeOfDayGreeting() {
+  const h = new Date().getHours();
+  if (h < 5) return "Late night";
+  if (h < 12) return "Good morning";
+  if (h < 17) return "Good afternoon";
+  return "Good evening";
 }
