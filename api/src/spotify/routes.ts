@@ -388,3 +388,98 @@ spotifyRouter.get("/search", requireAuth, async (req, res, next) => {
     next(err);
   }
 });
+
+// Playlist tracks proxy — moved server-side so we get full diagnostic logging
+// when Spotify returns errors. The browser-side version was hiding crucial
+// detail (WWW-Authenticate headers, full error body) and CORS was eating
+// some response info, making 403s opaque.
+//
+// Logs:
+//   - playlist owner (so we can confirm Spotify-owned vs user-owned)
+//   - any failure status with full body + www-authenticate
+//   - request URL with field selector
+spotifyRouter.get("/playlists/:id/tracks", requireAuth, async (req, res, next) => {
+  try {
+    const playlistId = String(req.params.id);
+    if (!playlistId || playlistId.length > 64) {
+      return res.status(400).json({ error: "Invalid playlist id" });
+    }
+
+    const token = await refreshSpotifyTokenForUser(req.user!.sub).catch((e) => {
+      console.warn("[spotify:playlist-tracks] token refresh failed:", (e as Error).message);
+      throw new Error("Spotify not connected. Reconnect from your account page.");
+    });
+
+    // First, fetch the playlist metadata so we can log who owns it. Spotify
+    // returns 403 on /tracks for some Spotify-owned editorial playlists even
+    // when the user "follows" them (Nov 2024 Web API deprecation). Knowing
+    // the owner tells us whether it's that case vs an account-level issue.
+    const metaUrl = `https://api.spotify.com/v1/playlists/${encodeURIComponent(playlistId)}?fields=id,name,owner(id,display_name),public,collaborative,tracks(total)`;
+    const metaRes = await fetch(metaUrl, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    let ownerId: string | null = null;
+    if (metaRes.ok) {
+      const meta = (await metaRes.json()) as {
+        owner?: { id?: string; display_name?: string };
+        name?: string;
+        public?: boolean;
+        collaborative?: boolean;
+        tracks?: { total?: number };
+      };
+      ownerId = meta.owner?.id ?? null;
+      console.log(
+        `[spotify:playlist-tracks] playlistId=${playlistId} name="${meta.name}" owner=${ownerId} ` +
+          `displayName="${meta.owner?.display_name ?? ""}" public=${meta.public} ` +
+          `collaborative=${meta.collaborative} total=${meta.tracks?.total ?? "?"}`,
+      );
+    } else {
+      const metaBody = await metaRes.text().catch(() => "");
+      const metaAuth = metaRes.headers.get("www-authenticate") ?? "";
+      console.warn(
+        `[spotify:playlist-tracks] meta ${metaRes.status} ${playlistId}` +
+          (metaAuth ? ` www-authenticate="${metaAuth}"` : "") +
+          ` body=${metaBody.slice(0, 300)}`,
+      );
+    }
+
+    const tracksUrl = `https://api.spotify.com/v1/playlists/${encodeURIComponent(playlistId)}/tracks?limit=100&fields=items(track(uri,name,duration_ms,artists(name),album(name,images)))`;
+    const tracksRes = await fetch(tracksUrl, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    if (!tracksRes.ok) {
+      const body = await tracksRes.text().catch(() => "");
+      const wwwAuth = tracksRes.headers.get("www-authenticate") ?? "";
+      console.warn(
+        `[spotify:playlist-tracks] tracks ${tracksRes.status} ${playlistId} owner=${ownerId}` +
+          (wwwAuth ? ` www-authenticate="${wwwAuth}"` : "") +
+          ` body=${body.slice(0, 500)}`,
+      );
+      let parsedMessage = `Spotify returned ${tracksRes.status}`;
+      try {
+        const parsed = JSON.parse(body) as { error?: { message?: string } };
+        if (parsed?.error?.message) parsedMessage = `Spotify: ${parsed.error.message}`;
+      } catch { /* not JSON */ }
+      const friendly =
+        tracksRes.status === 403 && ownerId === "spotify"
+          ? "This is a Spotify editorial playlist. New apps in Development Mode can no longer access its tracks (Web API deprecation, Nov 2024)."
+          : tracksRes.status === 401
+          ? "Spotify token expired. Reconnect from settings."
+          : tracksRes.status === 403
+          ? `${parsedMessage}. Owner is ${ownerId ?? "unknown"} — if it's not you, check the User Management list in the Spotify Developer Dashboard.`
+          : parsedMessage;
+      return res
+        .status(tracksRes.status === 401 ? 401 : 502)
+        .json({ error: friendly, ownerId, upstream_status: tracksRes.status });
+    }
+
+    const data = (await tracksRes.json()) as { items?: unknown[] };
+    console.log(
+      `[spotify:playlist-tracks] OK playlistId=${playlistId} → ${data.items?.length ?? 0} items`,
+    );
+    res.json(data);
+  } catch (err) {
+    next(err);
+  }
+});

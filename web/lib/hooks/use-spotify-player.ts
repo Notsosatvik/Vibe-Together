@@ -439,23 +439,31 @@ export async function getMyPlaylists(): Promise<SpotifyPlaylist[]> {
  * clean SpotifyTrack[].
  */
 export async function getPlaylistTracks(playlistId: string): Promise<SpotifyTrack[]> {
-  const { access_token } = await apiFetch<{ access_token: string }>("/spotify/token");
-  const url = `https://api.spotify.com/v1/playlists/${encodeURIComponent(
-    playlistId,
-  )}/tracks?limit=100&fields=items(track(uri,name,duration_ms,artists(name),album(name,images)))`;
-  const r = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${access_token}`,
-      Accept: "application/json",
-    },
-  });
-  if (!r.ok) throw await formatSpotifyError(r);
-  const data = (await r.json()) as {
-    items?: { track: SpotifyTrack | null }[];
-  };
-  return (data.items ?? [])
-    .map((i) => i.track)
-    .filter((t): t is SpotifyTrack => !!t && !!t.uri);
+  // Routed through our API now — the server-side proxy logs the full
+  // Spotify response (including WWW-Authenticate headers) on failure so
+  // we can diagnose opaque 403s in Railway logs. It also fetches playlist
+  // metadata to know whether the owner is "spotify" (editorial playlist,
+  // hit by the Nov 2024 Web API deprecation for new apps).
+  //
+  // Throws an ApiError with .status set, which the UI's existing
+  // isAuthLikeError check still pattern-matches against for the
+  // "Reconnect Spotify" CTA.
+  try {
+    const data = await apiFetch<{
+      items?: { track: SpotifyTrack | null }[];
+    }>(`/spotify/playlists/${encodeURIComponent(playlistId)}/tracks`);
+    return (data.items ?? [])
+      .map((i) => i.track)
+      .filter((t): t is SpotifyTrack => !!t && !!t.uri);
+  } catch (e) {
+    // Repackage ApiError → SpotifyApiError so existing isAuthLikeError() checks
+    // (which test `instanceof SpotifyApiError`) keep working in the UI.
+    const apiErr = e as { status?: number; message?: string };
+    throw new SpotifyApiError(
+      apiErr.message ?? "Failed to load playlist tracks",
+      apiErr.status ?? 0,
+    );
+  }
 }
 
 /**
