@@ -225,10 +225,16 @@ export function RoomPlayer({
   // -------------------------------------------------------------------------
   // Render
   // -------------------------------------------------------------------------
+  // Until the first track is queued there's nothing to "now play", so we put
+  // the search panel front-and-centre for the host. Once something is queued,
+  // Now Playing climbs back to the top and search drops below.
+  const hasTrack = !!currentTrack;
   return (
     <div className="space-y-4">
       <SpotifyPlayerBanner status={playerStatus} error={playerError} />
       <LiveSyncBanner status={socketStatus} />
+
+      {isHost && !hasTrack && <SearchPanel onAdd={onAddToQueue} />}
 
       <NowPlaying
         playback={playback}
@@ -239,7 +245,7 @@ export function RoomPlayer({
         onSkip={onSkip}
       />
 
-      {isHost && <SearchPanel onAdd={onAddToQueue} />}
+      {isHost && hasTrack && <SearchPanel onAdd={onAddToQueue} />}
 
       <div className="rounded-2xl border border-white/8 bg-white/[0.025] p-4">
         <div className="flex items-center justify-between mb-3">

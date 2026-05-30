@@ -182,16 +182,42 @@ spotifyRouter.get("/token", requireAuth, async (req, res, next) => {
 });
 
 // Search proxy — frontend hits this to find tracks for the queue.
+//
+// Previously this just forwarded `data` from Spotify regardless of status —
+// which meant a 401/403/429 from Spotify silently showed up on the client as
+// "No results" because data.tracks was undefined. Now we surface those.
 spotifyRouter.get("/search", requireAuth, async (req, res, next) => {
   try {
     const q = String(req.query.q ?? "").slice(0, 200);
-    if (!q) return res.json({ tracks: [] });
-    const token = await refreshSpotifyTokenForUser(req.user!.sub);
+    if (!q) return res.json({ tracks: { items: [] } });
+
+    const token = await refreshSpotifyTokenForUser(req.user!.sub).catch((e) => {
+      console.warn("[spotify:search] token refresh failed:", (e as Error).message);
+      throw new Error("Spotify not connected. Reconnect from your account page.");
+    });
+
     const r = await fetch(
       `https://api.spotify.com/v1/search?type=track&limit=20&q=${encodeURIComponent(q)}`,
-      { headers: { Authorization: `Bearer ${token}` } }
+      { headers: { Authorization: `Bearer ${token}` } },
     );
-    const data = await r.json();
+
+    if (!r.ok) {
+      const errText = await r.text().catch(() => "");
+      console.warn(`[spotify:search] upstream ${r.status}: ${errText}`);
+      // 401 = expired token, 403 = scope/region, 429 = rate limited
+      const friendly =
+        r.status === 401
+          ? "Spotify token expired. Reconnect from your account page."
+          : r.status === 403
+          ? "Spotify rejected this query — your account region may not have access."
+          : r.status === 429
+          ? "Spotify rate-limited us. Try again in a few seconds."
+          : `Spotify returned ${r.status}.`;
+      return res.status(r.status === 401 ? 401 : 502).json({ error: friendly });
+    }
+
+    const data = (await r.json()) as { tracks?: { items?: unknown[] } };
+    console.log(`[spotify:search] q="${q}" → ${data.tracks?.items?.length ?? 0} items`);
     res.json(data);
   } catch (err) {
     next(err);
