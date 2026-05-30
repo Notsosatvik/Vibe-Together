@@ -451,7 +451,19 @@ spotifyRouter.get("/token", requireAuth, async (req, res, next) => {
     if (!user?.spotifyRefreshToken) {
       return res.status(409).json({ error: "Spotify not connected" });
     }
-    let token = await refreshSpotifyTokenForUser(req.user!.sub);
+    // The client passes ?force=1 when it just hit a 403 PREMIUM_REQUIRED on a
+    // playback API call. That error means Spotify's playback service is
+    // reading stale plan claims off the access token (most commonly: the
+    // user upgraded to Premium *after* we minted this token, and the token's
+    // baked-in plan still says Free even though /v1/me reports Premium).
+    // Force-refresh mints a brand-new token with fresh claims.
+    const force = req.query.force === "1" || req.query.force === "true";
+    let token = await refreshSpotifyTokenForUser(req.user!.sub, { force });
+    if (force) {
+      console.info(
+        `[spotify:token] force-refresh requested by client for ${req.user!.sub}`,
+      );
+    }
 
     let product = user.spotifyProduct;
     if (product !== "premium") {

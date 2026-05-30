@@ -340,9 +340,9 @@ export async function playTrackOnDevice(
     position_ms: Math.max(0, Math.floor(positionMs)),
   });
 
-  const attempt = async () => {
+  const attempt = async (forceRefresh = false) => {
     const { access_token } = await apiFetch<{ access_token: string }>(
-      "/spotify/token",
+      forceRefresh ? "/spotify/token?force=1" : "/spotify/token",
     );
     return fetch(url, {
       method: "PUT",
@@ -365,6 +365,22 @@ export async function playTrackOnDevice(
     );
     await new Promise((res) => setTimeout(res, 600));
     r = await attempt();
+  }
+  // 403 PREMIUM_REQUIRED most often means the user upgraded to Premium AFTER
+  // their current access token was minted — Spotify pins the plan tier into
+  // the token's claims, so the playback service still sees "free" even
+  // though /v1/me reports "premium". Force-refresh once via the server's
+  // ?force=1 path (which bypasses the "still valid" short-circuit and hits
+  // POST /api/token with the refresh_token) and retry. The new token's
+  // claims pick up the upgraded plan.
+  if (r.status === 403) {
+    const peek = await r.clone().text().catch(() => "");
+    if (/premium.*required|player command failed/i.test(peek)) {
+      console.warn(
+        "[spotify-cmd] play got 403 PREMIUM_REQUIRED — force-refreshing token and retrying once",
+      );
+      r = await attempt(true);
+    }
   }
   if (!r.ok) throw await formatSpotifyError(r);
 }
