@@ -107,7 +107,7 @@ export default function SettingsPage() {
                   <div className="text-sm text-white/70">
                     You haven't connected Spotify yet. You need it to host rooms.
                   </div>
-                  <Button onClick={startSpotifyConnect}>Connect Spotify</Button>
+                  <Button onClick={() => void startSpotifyConnect()}>Connect Spotify</Button>
                 </div>
               )}
               <div className="mt-4 text-xs text-white/40">

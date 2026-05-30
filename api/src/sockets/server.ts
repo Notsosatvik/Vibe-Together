@@ -17,6 +17,29 @@ import type {
 type IO = Server<ClientToServerEvents, ServerToClientEvents, {}, SocketData>;
 type S = Socket<ClientToServerEvents, ServerToClientEvents, {}, SocketData>;
 
+// Per-room serialization for queue:add.
+//
+// The queue position is computed via read-then-write: find last.position,
+// insert at last.position + 1. Concurrent emits (e.g. "Queue all" firing
+// 50 inserts back-to-back) all read the same last.position and collide on
+// the same target position, producing a queue with ambiguous ordering.
+//
+// We chain them per-room so the read-modify-write block runs sequentially.
+// This is in-memory only — if the API scales to multiple instances, this
+// would need a Redis lock instead. Single-instance is fine for now.
+const queueAddChains = new Map<string, Promise<unknown>>();
+function runSerialPerRoom<T>(roomId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = queueAddChains.get(roomId) ?? Promise.resolve();
+  // .catch swallows prior failures so one bad insert doesn't poison the chain.
+  const next = prev.catch(() => undefined).then(() => fn());
+  queueAddChains.set(roomId, next);
+  next.finally(() => {
+    // Tidy up so the map doesn't grow unbounded across abandoned rooms.
+    if (queueAddChains.get(roomId) === next) queueAddChains.delete(roomId);
+  });
+  return next;
+}
+
 export function initSocketServer(httpServer: http.Server): IO {
   const allowedOrigins = (origin: string | undefined): boolean => {
     if (!origin) return true;
@@ -234,12 +257,26 @@ function bindRoom(io: IO, socket: S) {
 
   socket.on(
     "playback:next",
-    safe<{ roomId: string }>("playback:next", async ({ roomId }) => {
+    safe<{ roomId: string; expectedTrackUri?: string }>(
+      "playback:next",
+      async ({ roomId, expectedTrackUri }) => {
       if (!(await isHostOrCohost(socket.data.userId!, roomId))) return;
 
       // Mark whatever's currently playing as played so it advances off the
       // queue, then pick the next unplayed item.
       const current = await loadPlayback(roomId);
+
+      // Stale-advance guard: when the client asserts which track it thought
+      // was ending (auto-advance flow), only honor the skip if that matches
+      // the room's current track. Without this, a manual skip + a delayed
+      // SDK "track ended" event would advance the queue twice in a row.
+      if (expectedTrackUri && current.trackUri !== expectedTrackUri) {
+        console.info(
+          `[playback:next] stale advance: expected ${expectedTrackUri} but current is ${current.trackUri} — ignoring`,
+        );
+        return;
+      }
+
       if (current.trackUri) {
         await prisma.queueItem
           .updateMany({
@@ -300,74 +337,78 @@ function bindRoom(io: IO, socket: S) {
   socket.on("queue:add", async ({ roomId, trackUri }) => {
     const userId = socket.data.userId;
     if (!userId || !trackUri) return;
-    try {
-      // Resolve track metadata from Spotify using the requester's token.
-      const token = await refreshSpotifyTokenForUser(userId);
-      const trackId = trackUri.split(":").pop();
-      const r = await fetch(`https://api.spotify.com/v1/tracks/${trackId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!r.ok) return;
-      const t = (await r.json()) as {
-        name: string;
-        duration_ms: number;
-        artists: { name: string }[];
-        album: { name: string; images: { url: string }[] };
-      };
-
-      // Append to the end of the queue.
-      const last = await prisma.queueItem.findFirst({
-        where: { roomId, playedAt: null },
-        orderBy: { position: "desc" },
-      });
-      const created = await prisma.queueItem.create({
-        data: {
-          roomId,
-          trackUri,
-          trackName: t.name,
-          artistName: t.artists.map((a) => a.name).join(", "),
-          albumName: t.album.name,
-          albumArtUrl: t.album.images[0]?.url ?? null,
-          durationMs: t.duration_ms,
-          addedById: userId,
-          position: (last?.position ?? 0) + 1,
-        },
-      });
-
-      // Re-broadcast the full live queue so everyone re-renders consistently.
-      const items = await prisma.queueItem.findMany({
-        where: { roomId, playedAt: null },
-        orderBy: { position: "asc" },
-      });
-      io.to(roomId).emit("queue:update", {
-        items: items.map((q) => ({
-          id: q.id,
-          trackUri: q.trackUri,
-          trackName: q.trackName,
-          artistName: q.artistName,
-          albumArtUrl: q.albumArtUrl,
-          durationMs: q.durationMs,
-          addedById: q.addedById,
-          position: q.position,
-        })),
-      });
-
-      // If nothing is currently playing, auto-start with this track so the
-      // host doesn't have to hit play after adding the first song.
-      const playback = await loadPlayback(roomId);
-      if (!playback.trackUri && created.position === 1) {
-        const state = {
-          trackUri,
-          isPlaying: true,
-          positionMs: 0,
-          lastSyncAt: Date.now(),
+    // Serialize per room so "Queue all" can fire 50 emits in a row without
+    // colliding on the read-then-write of `position`. See queueAddChains.
+    await runSerialPerRoom(roomId, async () => {
+      try {
+        // Resolve track metadata from Spotify using the requester's token.
+        const token = await refreshSpotifyTokenForUser(userId);
+        const trackId = trackUri.split(":").pop();
+        const r = await fetch(`https://api.spotify.com/v1/tracks/${trackId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!r.ok) return;
+        const t = (await r.json()) as {
+          name: string;
+          duration_ms: number;
+          artists: { name: string }[];
+          album: { name: string; images: { url: string }[] };
         };
-        await savePlayback(roomId, state);
-        io.to(roomId).emit("playback:state", state);
+
+        // Append to the end of the queue.
+        const last = await prisma.queueItem.findFirst({
+          where: { roomId, playedAt: null },
+          orderBy: { position: "desc" },
+        });
+        const created = await prisma.queueItem.create({
+          data: {
+            roomId,
+            trackUri,
+            trackName: t.name,
+            artistName: t.artists.map((a) => a.name).join(", "),
+            albumName: t.album.name,
+            albumArtUrl: t.album.images[0]?.url ?? null,
+            durationMs: t.duration_ms,
+            addedById: userId,
+            position: (last?.position ?? 0) + 1,
+          },
+        });
+
+        // Re-broadcast the full live queue so everyone re-renders consistently.
+        const items = await prisma.queueItem.findMany({
+          where: { roomId, playedAt: null },
+          orderBy: { position: "asc" },
+        });
+        io.to(roomId).emit("queue:update", {
+          items: items.map((q) => ({
+            id: q.id,
+            trackUri: q.trackUri,
+            trackName: q.trackName,
+            artistName: q.artistName,
+            albumArtUrl: q.albumArtUrl,
+            durationMs: q.durationMs,
+            addedById: q.addedById,
+            position: q.position,
+          })),
+        });
+
+        // If nothing is currently playing, auto-start with this track so the
+        // host doesn't have to hit play after adding the first song.
+        const playback = await loadPlayback(roomId);
+        if (!playback.trackUri && created.position === 1) {
+          const state = {
+            trackUri,
+            isPlaying: true,
+            positionMs: 0,
+            lastSyncAt: Date.now(),
+          };
+          await savePlayback(roomId, state);
+          io.to(roomId).emit("playback:state", state);
+        }
+      } catch {
+        /* swallow — adding a bad track shouldn't crash the room */
       }
-    } catch {
-      /* swallow — adding a bad track shouldn't crash the room */
-    }
+    });
   });
 
   socket.on("chat:send", async ({ roomId, text }) => {

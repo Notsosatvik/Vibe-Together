@@ -1,15 +1,26 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch } from "@/lib/api";
 
 // Minimal Web Playback SDK surface — we don't pull in the full @types/spotify-web-playback-sdk
 // dependency just for a handful of fields.
+type SpotifyPlayerState = {
+  position: number;
+  duration: number;
+  paused: boolean;
+  track_window?: {
+    current_track?: { uri?: string } | null;
+    previous_tracks?: { uri?: string | null }[];
+  };
+};
+
 type SpotifyPlayerLike = {
   connect: () => Promise<boolean>;
   disconnect: () => void;
   addListener: (event: string, cb: (data: unknown) => void) => void;
   togglePlay: () => Promise<void>;
+  getCurrentState: () => Promise<SpotifyPlayerState | null>;
 };
 
 declare global {
@@ -52,7 +63,24 @@ function loadSdk(): Promise<void> {
 
 type PlayerStatus = "idle" | "loading" | "ready" | "no-premium" | "error";
 
-export function useSpotifyPlayer(enabled: boolean) {
+export type UseSpotifyPlayerOptions = {
+  /**
+   * Fired when the Web Playback SDK reports a track finished playing on its
+   * own (as opposed to being paused or skipped by the user). The argument is
+   * the URI of the track that just ended.
+   *
+   * The detection is conservative — see the `player_state_changed` listener
+   * for the exact heuristic. Callers should still race-guard inside the
+   * callback (e.g. compare against the latest known playback.trackUri) to
+   * avoid double-advancing when manual skips and natural ends overlap.
+   */
+  onTrackEnded?: (endedTrackUri: string) => void;
+};
+
+export function useSpotifyPlayer(
+  enabled: boolean,
+  opts?: UseSpotifyPlayerOptions,
+) {
   const [status, setStatus] = useState<PlayerStatus>("idle");
   const [deviceId, setDeviceId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -61,6 +89,15 @@ export function useSpotifyPlayer(enabled: boolean) {
   // Mirror of `status` for use inside setTimeout/event handlers where we
   // don't want to depend on a possibly-stale closure.
   const statusRef = useRef<PlayerStatus>("idle");
+
+  // Stash the latest onTrackEnded in a ref so the player listener (which is
+  // attached once during setup) always invokes the freshest callback —
+  // otherwise we'd have to tear down + reconnect the SDK every time the
+  // parent component re-rendered with a new closure.
+  const onTrackEndedRef = useRef(opts?.onTrackEnded);
+  useEffect(() => {
+    onTrackEndedRef.current = opts?.onTrackEnded;
+  });
 
   useEffect(() => {
     if (!enabled) return;
@@ -160,6 +197,71 @@ export function useSpotifyPlayer(enabled: boolean) {
           console.warn("[spotify-player] playback_error", data);
         });
 
+        // -----------------------------------------------------------------
+        // Natural end-of-track detection.
+        // -----------------------------------------------------------------
+        // Spotify doesn't fire a dedicated "ended" event. Instead, when a
+        // track finishes on its own, `player_state_changed` fires with:
+        //   - paused: true
+        //   - position: 0
+        //   - track_window.previous_tracks[0]: <the track that just ended>
+        //
+        // This pattern is identical to the one Spotify uses in its own
+        // documented "detect track end" examples. We add two extra guards
+        // to avoid false positives:
+        //   1. We track whether the previously-seen state was actually
+        //      mid-track (playing, position > 1s). The SDK briefly shows
+        //      paused/position=0 right after a play command is issued
+        //      *before* audio actually starts; without this guard we'd
+        //      auto-advance off our own brand-new track.
+        //   2. The "ended" track URI must appear in previous_tracks of the
+        //      new state. This filters out the equivalent "we just paused
+        //      a fresh track" transient.
+        let lastObserved: { trackUri: string | null; wasMidTrack: boolean } = {
+          trackUri: null,
+          wasMidTrack: false,
+        };
+        player.addListener("player_state_changed", (raw) => {
+          const s = raw as SpotifyPlayerState | null;
+          if (!s) return;
+          const currentUri = s.track_window?.current_track?.uri ?? null;
+          const position = s.position ?? 0;
+          const duration = s.duration ?? 0;
+          const paused = s.paused ?? false;
+
+          const endedUri = lastObserved.trackUri;
+          if (
+            endedUri &&
+            lastObserved.wasMidTrack &&
+            paused &&
+            position === 0 &&
+            duration > 0 &&
+            (s.track_window?.previous_tracks ?? []).some(
+              (t) => t?.uri === endedUri,
+            )
+          ) {
+            console.info(
+              "[spotify-player] detected natural track end:",
+              endedUri,
+            );
+            try {
+              onTrackEndedRef.current?.(endedUri);
+            } catch (err) {
+              console.warn(
+                "[spotify-player] onTrackEnded callback threw",
+                err,
+              );
+            }
+          }
+
+          lastObserved = {
+            trackUri: currentUri,
+            // Only arm the "was playing" flag once audio is actually past
+            // the 1s mark — see comment block above.
+            wasMidTrack: !paused && position > 1000,
+          };
+        });
+
         console.info("[spotify-player] connecting …");
         const connected = await player.connect();
         console.info("[spotify-player] player.connect() returned", connected);
@@ -192,7 +294,19 @@ export function useSpotifyPlayer(enabled: boolean) {
     };
   }, [enabled]);
 
-  return { status, deviceId, error };
+  // Stable function reference so callers can put it in an effect's deps array
+  // without retriggering every render. Reads through to the latest player.
+  const getCurrentState = useCallback(async (): Promise<SpotifyPlayerState | null> => {
+    if (!playerRef.current) return null;
+    try {
+      return await playerRef.current.getCurrentState();
+    } catch (e) {
+      console.warn("[spotify-player] getCurrentState threw:", e);
+      return null;
+    }
+  }, []);
+
+  return { status, deviceId, error, getCurrentState };
 }
 
 /**

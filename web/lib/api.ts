@@ -141,24 +141,41 @@ export function startGoogleLogin() {
   window.location.href = `${API_URL}/auth/google`;
 }
 
-export async function startSpotifyConnect() {
+export async function startSpotifyConnect(returnTo?: string) {
   // Spotify connect is a top-level navigation (it 302s to Spotify), so we
   // can't attach Authorization headers. If cookies aren't being delivered
   // cross-site, mint a 60-second one-time ticket and pass that in the URL.
   // The ticket is far shorter-lived than the access token and is the same
   // pattern used by other token-fallback OAuth flows.
+  //
+  // `returnTo` is an optional same-origin path the user should be redirected
+  // to once OAuth completes — used by the in-room "Reconnect Spotify" button
+  // so the user lands back in the room they were in (rather than the
+  // generic /dashboard). We validate it client-side too; the API does the
+  // authoritative check before honoring it.
+  const safeReturnTo =
+    typeof returnTo === "string" &&
+    returnTo.startsWith("/") &&
+    !returnTo.startsWith("//")
+      ? returnTo
+      : undefined;
+
+  const params = new URLSearchParams();
+  if (safeReturnTo) params.set("return_to", safeReturnTo);
+
   try {
     const { ticket } = await apiFetch<{ ticket: string }>("/auth/ticket", {
       method: "POST",
       body: JSON.stringify({}),
     });
-    window.location.href = `${API_URL}/spotify/connect?ticket=${encodeURIComponent(ticket)}`;
-    return;
+    params.set("ticket", ticket);
   } catch {
-    // No ticket — fall back to the plain cookie-based path. Will succeed
+    // No ticket — fall through with just return_to (if any). Will succeed
     // if the browser is sending the access_token cookie cross-site.
-    window.location.href = `${API_URL}/spotify/connect`;
   }
+
+  const qs = params.toString();
+  window.location.href = `${API_URL}/spotify/connect${qs ? `?${qs}` : ""}`;
 }
 
 export async function logout(): Promise<void> {

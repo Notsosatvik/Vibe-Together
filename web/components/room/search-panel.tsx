@@ -524,7 +524,14 @@ function InlineError({
           </span>
           <button
             onClick={() => {
-              void startSpotifyConnect();
+              // Pass the current room URL through so the OAuth round-trip
+              // brings the user back here instead of dumping them on the
+              // dashboard. Includes any query string (?invite= etc.).
+              const returnTo =
+                typeof window !== "undefined"
+                  ? window.location.pathname + window.location.search
+                  : undefined;
+              void startSpotifyConnect(returnTo);
             }}
             className="rounded-md bg-rose-400/15 hover:bg-rose-400/25 border border-rose-400/30 px-2 py-0.5 text-[11px] font-medium transition-colors whitespace-nowrap"
           >

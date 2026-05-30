@@ -70,6 +70,25 @@ spotifyRouter.get("/connect", (req, res, next) => {
   // Encode our user id in the state so the callback can look up the right account.
   const encoded = `${state}:${req.user!.sub}`;
   res.cookie("spotify_state", state, { ...crossSiteCookie, maxAge: 5 * 60 * 1000 });
+
+  // Optional ?return_to=/some/path — must be a relative path on our own
+  // origin. Rejecting anything else stops this from becoming an open-redirect
+  // primitive (e.g. ?return_to=https://evil.example/phish would otherwise
+  // bounce the user off-site post-auth).
+  const rawReturnTo = typeof req.query.return_to === "string" ? req.query.return_to : "";
+  if (
+    rawReturnTo &&
+    rawReturnTo.length < 512 &&
+    rawReturnTo.startsWith("/") &&
+    !rawReturnTo.startsWith("//") &&
+    !rawReturnTo.includes("://")
+  ) {
+    res.cookie("spotify_return_to", rawReturnTo, {
+      ...crossSiteCookie,
+      maxAge: 5 * 60 * 1000,
+    });
+  }
+
   const params = new URLSearchParams({
     client_id: env.SPOTIFY_CLIENT_ID,
     response_type: "code",
@@ -128,7 +147,27 @@ spotifyRouter.get("/callback", async (req, res, next) => {
     });
 
     res.clearCookie("spotify_state", { ...crossSiteCookie });
-    res.redirect(`${env.WEB_ORIGIN}/dashboard?spotify=connected`);
+
+    // Honor the optional same-origin return_to from /connect if we set it.
+    // Re-validate here because cookies aren't tamper-proof (they came back
+    // from the browser) — same shape checks as on the way in.
+    const returnTo = req.cookies?.spotify_return_to;
+    res.clearCookie("spotify_return_to", { ...crossSiteCookie });
+
+    let dest = `${env.WEB_ORIGIN}/dashboard?spotify=connected`;
+    if (
+      typeof returnTo === "string" &&
+      returnTo.length < 512 &&
+      returnTo.startsWith("/") &&
+      !returnTo.startsWith("//") &&
+      !returnTo.includes("://")
+    ) {
+      // Append spotify=connected as a hint to the destination page so it can
+      // surface a "Spotify reconnected" toast / re-fetch scopes if needed.
+      const sep = returnTo.includes("?") ? "&" : "?";
+      dest = `${env.WEB_ORIGIN}${returnTo}${sep}spotify=connected`;
+    }
+    res.redirect(dest);
   } catch (err) {
     next(err);
   }

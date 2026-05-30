@@ -19,7 +19,11 @@ export type ClientToServerEvents = {
   "playback:play": (payload: { roomId: string; positionMs: number; trackUri: string }) => void;
   "playback:pause": (payload: { roomId: string; positionMs: number }) => void;
   "playback:seek": (payload: { roomId: string; positionMs: number }) => void;
-  "playback:next": (payload: { roomId: string }) => void;
+  // expectedTrackUri (optional): the URI the client *thinks* is currently
+  // playing. When provided, the server only advances if the room's current
+  // track URI matches. This guards against stale auto-advance emits racing
+  // with manual skips (which would otherwise double-advance the queue).
+  "playback:next": (payload: { roomId: string; expectedTrackUri?: string }) => void;
 
   // Anyone in the room
   "chat:send": (payload: { roomId: string; text: string }) => void;

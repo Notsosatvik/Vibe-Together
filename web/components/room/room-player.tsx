@@ -1,8 +1,13 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, Loader2, Volume2, Wifi, WifiOff } from "lucide-react";
-import { useSpotifyPlayer, playTrackOnDevice, pausePlayback } from "@/lib/hooks/use-spotify-player";
+import {
+  useSpotifyPlayer,
+  playTrackOnDevice,
+  pausePlayback,
+  seekPlayback,
+} from "@/lib/hooks/use-spotify-player";
 import { getSocket, computeTargetPosition, type PlaybackState, type QueueItemDTO, type RoomStateDTO } from "@/lib/socket";
 import { SearchPanel } from "./search-panel";
 import { NowPlaying, QueueList } from "./now-playing";
@@ -32,9 +37,6 @@ export function RoomPlayer({
   initialPlayback: PlaybackState;
   initialQueue: QueueItemDTO[];
 }) {
-  const { status: playerStatus, deviceId, error: playerError } =
-    useSpotifyPlayer(true);
-
   const [playback, setPlayback] = useState<PlaybackState>(initialPlayback);
   const [queue, setQueue] = useState<QueueItemDTO[]>(initialQueue);
   const [socketStatus, setSocketStatus] = useState<SocketStatus>({ kind: "connecting" });
@@ -45,6 +47,44 @@ export function RoomPlayer({
     trackUri: null,
     isPlaying: false,
   });
+
+  // Mirror playback into a ref so callbacks (track-end, drift-correct) can
+  // read the LATEST value without having to redeclare themselves every render.
+  // Without this, the track-end callback would close over a stale trackUri
+  // and either no-op or fire the wrong advance.
+  const playbackRef = useRef(playback);
+  useEffect(() => {
+    playbackRef.current = playback;
+  }, [playback]);
+
+  // Fires when this user's Spotify SDK naturally finishes a track.
+  // Only the host should drive the room forward — listeners just observe.
+  // We pass expectedTrackUri so the server can ignore stale advances that
+  // raced with a manual skip.
+  const handleTrackEnded = useCallback(
+    (endedTrackUri: string) => {
+      if (!isHost) return;
+      const currentUri = playbackRef.current.trackUri;
+      if (currentUri !== endedTrackUri) {
+        // We've already moved on (e.g. host clicked Skip during the end-of-
+        // track transient). Don't double-advance.
+        console.info(
+          `[room-player] track-ended for ${endedTrackUri}, but current is ${currentUri} — ignoring`,
+        );
+        return;
+      }
+      console.info("[room-player] auto-advancing queue on track end:", endedTrackUri);
+      getSocket().emit("playback:next", { roomId, expectedTrackUri: endedTrackUri });
+    },
+    [isHost, roomId],
+  );
+
+  const {
+    status: playerStatus,
+    deviceId,
+    error: playerError,
+    getCurrentState,
+  } = useSpotifyPlayer(true, { onTrackEnded: handleTrackEnded });
 
   // -------------------------------------------------------------------------
   // Socket lifecycle
@@ -169,19 +209,46 @@ export function RoomPlayer({
   }, [deviceId, playerStatus, playback]);
 
   // -------------------------------------------------------------------------
-  // Periodic drift correction — if our local position is >800ms off, nudge it.
+  // Periodic drift correction.
   // -------------------------------------------------------------------------
+  // Compares the SDK's local position against the server-projected position
+  // every few seconds. If we've drifted by more than 1.5s (buffering hiccup,
+  // tab throttle on background tab, slow network jitter), seek to catch up.
+  // Without this, listeners on flaky networks slowly fall further out of
+  // sync with the host as the song plays.
   useEffect(() => {
-    if (!deviceId || playerStatus !== "ready" || !playback.isPlaying) return;
-    const interval = window.setInterval(() => {
-      // Best-effort: trust server position, seek if we're drifting too much.
-      // The Web Playback SDK doesn't expose getCurrentState() in a way we can
-      // easily diff here without more state, so we just trust the periodic
-      // server tick to call playback:state if drift is large.
-      // (Future improvement: read player.getCurrentState() and compare.)
+    if (
+      !deviceId ||
+      playerStatus !== "ready" ||
+      !playback.isPlaying ||
+      !playback.trackUri
+    ) {
+      return;
+    }
+    const interval = window.setInterval(async () => {
+      try {
+        const state = await getCurrentState();
+        if (!state || state.paused) return;
+        const cur = playbackRef.current;
+        if (!cur.isPlaying || !cur.trackUri) return;
+        // Only correct drift on the same track — during a transition the
+        // SDK will briefly report the old track's position.
+        const sdkUri = state.track_window?.current_track?.uri;
+        if (sdkUri && sdkUri !== cur.trackUri) return;
+        const target = computeTargetPosition(cur);
+        const drift = Math.abs(state.position - target);
+        if (drift > 1500) {
+          console.info(
+            `[room-player] drift=${Math.round(drift)}ms — seeking to ${target}ms`,
+          );
+          void seekPlayback(deviceId, target);
+        }
+      } catch (e) {
+        console.warn("[room-player] drift check failed:", e);
+      }
     }, 4000);
     return () => window.clearInterval(interval);
-  }, [deviceId, playerStatus, playback.isPlaying]);
+  }, [deviceId, playerStatus, playback.isPlaying, playback.trackUri, getCurrentState]);
 
   // -------------------------------------------------------------------------
   // Host actions — emit socket events; server is authoritative.
