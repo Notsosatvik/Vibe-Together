@@ -226,7 +226,28 @@ export async function refreshSpotifyTokenForUser(userId: string): Promise<string
       refresh_token: user.spotifyRefreshToken,
     }),
   });
-  const tokens = (await res.json()) as { access_token: string; expires_in: number };
+  const tokens = (await res.json()) as {
+    access_token: string;
+    expires_in: number;
+    scope?: string;
+  };
+  // Log the scope set on every refresh. Spotify pins scopes to the refresh
+  // token at issue time — they don't change on subsequent refreshes — so if
+  // a user is missing a scope here, the only remedy is for them to fully
+  // re-consent (which our /connect now forces via show_dialog=true). Having
+  // this log line means we don't need to wait for the next OAuth callback
+  // to see what scopes a given user actually has.
+  if (tokens.scope) {
+    const granted = tokens.scope.split(" ").filter(Boolean);
+    const missing = ["playlist-read-collaborative", "user-library-read"].filter(
+      (s) => !granted.includes(s),
+    );
+    if (missing.length > 0) {
+      console.warn(
+        `[spotify:refresh] userId=${userId} missing scopes=[${missing.join(",")}] — user needs to reconnect`,
+      );
+    }
+  }
   await prisma.user.update({
     where: { id: userId },
     data: {
