@@ -405,6 +405,15 @@ spotifyRouter.get("/playlists/:id/tracks", requireAuth, async (req, res, next) =
       return res.status(400).json({ error: "Invalid playlist id" });
     }
 
+    // Pull the user's Spotify ID up front so we can compare with the
+    // playlist owner. Spotify user IDs are often opaque random strings
+    // for SSO accounts, so the "is this mine?" check must be exact.
+    const user = await prisma.user.findUnique({
+      where: { id: req.user!.sub },
+      select: { spotifyId: true },
+    });
+    const mySpotifyId = user?.spotifyId ?? null;
+
     const token = await refreshSpotifyTokenForUser(req.user!.sub).catch((e) => {
       console.warn("[spotify:playlist-tracks] token refresh failed:", (e as Error).message);
       throw new Error("Spotify not connected. Reconnect from your account page.");
@@ -461,17 +470,29 @@ spotifyRouter.get("/playlists/:id/tracks", requireAuth, async (req, res, next) =
         const parsed = JSON.parse(body) as { error?: { message?: string } };
         if (parsed?.error?.message) parsedMessage = `Spotify: ${parsed.error.message}`;
       } catch { /* not JSON */ }
+      const ownedByMe = ownerId && mySpotifyId && ownerId === mySpotifyId;
       const friendly =
         tracksRes.status === 403 && ownerId === "spotify"
-          ? "This is a Spotify editorial playlist. New apps in Development Mode can no longer access its tracks (Web API deprecation, Nov 2024)."
+          ? "This is a Spotify editorial playlist. New apps in Development Mode can no longer access its tracks (Web API deprecation, Nov 2024). Try one of your own playlists instead."
           : tracksRes.status === 401
           ? "Spotify token expired. Reconnect from settings."
+          : tracksRes.status === 403 && ownedByMe
+          ? "Your account owns this playlist and all scopes are granted — yet Spotify is still refusing. This is almost certainly because the VibeTogether app is in Development Mode and your Spotify email isn't on the User Management list. Add it at developer.spotify.com/dashboard."
           : tracksRes.status === 403
-          ? `${parsedMessage}. Owner is ${ownerId ?? "unknown"} — if it's not you, check the User Management list in the Spotify Developer Dashboard.`
+          ? `You don't own this playlist — its owner is "${ownerId ?? "unknown"}", not your Spotify account (${mySpotifyId ?? "unknown"}). Spotify is blocking access to other users' private playlists. Try one of your own playlists.`
           : parsedMessage;
+      console.warn(
+        `[spotify:playlist-tracks] ${tracksRes.status} mine=${mySpotifyId} owner=${ownerId} ownedByMe=${ownedByMe}`,
+      );
       return res
         .status(tracksRes.status === 401 ? 401 : 502)
-        .json({ error: friendly, ownerId, upstream_status: tracksRes.status });
+        .json({
+          error: friendly,
+          ownerId,
+          mySpotifyId,
+          ownedByMe,
+          upstream_status: tracksRes.status,
+        });
     }
 
     const data = (await tracksRes.json()) as { items?: unknown[] };
