@@ -37,7 +37,17 @@ export function initSocketServer(httpServer: http.Server): IO {
   });
 
   // Multi-instance pub/sub via Redis — required for horizontal scaling.
-  io.adapter(createAdapter(redisPub, redisSub));
+  // If Upstash is misconfigured, fall back to the default in-memory adapter
+  // so single-instance broadcasts still work (and room:join doesn't 500).
+  try {
+    io.adapter(createAdapter(redisPub, redisSub));
+    console.log("[socket] using Redis adapter for cross-instance pub/sub");
+  } catch (e) {
+    console.error(
+      "[socket] Redis adapter setup failed; falling back to in-memory:",
+      (e as Error).message,
+    );
+  }
 
   // Auth: clients pass the JWT access token as a handshake auth field.
   io.use((socket, next) => {
@@ -85,12 +95,19 @@ function bindRoom(io: IO, socket: S) {
         /* ack already invoked or malformed */
       }
     };
+    // Track the most recent step we attempted so the error message tells us
+    // exactly where it failed (DB / cache / participant upsert / etc.) rather
+    // than a generic "server error" that requires Railway log spelunking.
+    let step = "init";
     try {
       const userId = socket.data.userId;
       if (!userId) return replyError("Not signed in.");
       if (!roomId) return replyError("Missing roomId.");
 
+      console.log(`[room:join] user=${userId} room=${roomId}`);
+
       // Authorize: must be allowed to join (privacy check done elsewhere).
+      step = "prisma.room.findUnique";
       const room = await prisma.room.findUnique({
         where: { id: roomId },
         include: {
@@ -105,15 +122,19 @@ function bindRoom(io: IO, socket: S) {
       });
       if (!room) return replyError("Room not found.");
 
+      step = "socket.join";
       socket.join(roomId);
 
+      step = "prisma.roomParticipant.upsert";
       await prisma.roomParticipant.upsert({
         where: { roomId_userId: { roomId, userId } },
         update: { leftAt: null },
         create: { roomId, userId, role: "LISTENER" },
       });
 
+      step = "loadPlayback";
       const playback = await loadPlayback(roomId);
+      step = "build response";
       const state: RoomState = {
         id: room.id,
         name: room.name,
@@ -147,8 +168,12 @@ function bindRoom(io: IO, socket: S) {
       ack?.({ ok: true, state });
       io.to(roomId).emit("room:presence", { userId, status: "joined" });
     } catch (err) {
-      console.error("[socket] room:join crashed:", err);
-      replyError("Server error joining room. Try again.");
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[socket] room:join crashed at step=${step}:`, err);
+      // Pass the actual error back to the client — this turns "server error,
+      // try again" into something like "loadPlayback: WRONGPASS invalid
+      // password" that's actionable from the browser console.
+      replyError(`room:join failed at ${step}: ${message}`);
     }
   });
 

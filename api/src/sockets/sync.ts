@@ -37,9 +37,35 @@ import { prisma } from "../lib/prisma.js";
 const HOT_KEY = (roomId: string) => `room:${roomId}:playback`;
 const TTL_SECONDS = 60 * 60 * 6; // 6h — refresh on every write
 
+// Redis is a CACHE only — if it's unreachable we must still be able to load
+// + save playback state from Postgres. Without these guards, a flaky Upstash
+// connection takes down every room:join with an uninformative server error.
+async function safeRedisGet(key: string): Promise<string | null> {
+  try {
+    return await redis.get(key);
+  } catch (e) {
+    console.warn("[sync] redis.get failed, falling back to DB:", (e as Error).message);
+    return null;
+  }
+}
+
+async function safeRedisSet(key: string, value: string): Promise<void> {
+  try {
+    await redis.set(key, value, "EX", TTL_SECONDS);
+  } catch (e) {
+    console.warn("[sync] redis.set failed (cache miss only):", (e as Error).message);
+  }
+}
+
 export async function loadPlayback(roomId: string): Promise<PlaybackState> {
-  const cached = await redis.get(HOT_KEY(roomId));
-  if (cached) return JSON.parse(cached) as PlaybackState;
+  const cached = await safeRedisGet(HOT_KEY(roomId));
+  if (cached) {
+    try {
+      return JSON.parse(cached) as PlaybackState;
+    } catch {
+      /* fall through to DB */
+    }
+  }
 
   const room = await prisma.room.findUnique({
     where: { id: roomId },
@@ -60,22 +86,24 @@ export async function loadPlayback(roomId: string): Promise<PlaybackState> {
     positionMs: room.currentPositionMs,
     lastSyncAt: room.lastSyncAt.getTime(),
   };
-  await redis.set(HOT_KEY(roomId), JSON.stringify(state), "EX", TTL_SECONDS);
+  await safeRedisSet(HOT_KEY(roomId), JSON.stringify(state));
   return state;
 }
 
 export async function savePlayback(roomId: string, state: PlaybackState): Promise<void> {
-  await redis.set(HOT_KEY(roomId), JSON.stringify(state), "EX", TTL_SECONDS);
+  await safeRedisSet(HOT_KEY(roomId), JSON.stringify(state));
   // Persist to Postgres — but throttled. In production wrap with a debounced writer.
-  await prisma.room.update({
-    where: { id: roomId },
-    data: {
-      currentTrackUri: state.trackUri,
-      isPlaying: state.isPlaying,
-      currentPositionMs: state.positionMs,
-      lastSyncAt: new Date(state.lastSyncAt),
-    },
-  }).catch(() => {});
+  await prisma.room
+    .update({
+      where: { id: roomId },
+      data: {
+        currentTrackUri: state.trackUri,
+        isPlaying: state.isPlaying,
+        currentPositionMs: state.positionMs,
+        lastSyncAt: new Date(state.lastSyncAt),
+      },
+    })
+    .catch((e) => console.warn("[sync] room update failed:", (e as Error).message));
 }
 
 // Compute the position a fresh joiner should start at, given the current state.
