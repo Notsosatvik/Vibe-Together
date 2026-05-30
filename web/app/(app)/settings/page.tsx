@@ -182,6 +182,58 @@ function SpotifyDiagnosePanel() {
 
       {result && (
         <div className="mt-3 space-y-2 text-xs">
+          {result.profile && (result.profile.email || result.profile.id) && (
+            <div className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2.5">
+              <div className="text-[10px] uppercase tracking-wider text-white/45 mb-1.5">
+                Connected Spotify account
+              </div>
+              <div className="font-mono text-[11px] space-y-1">
+                {result.profile.display_name && (
+                  <div>
+                    <span className="text-white/45">Name:</span>{" "}
+                    <span className="text-white/90">
+                      {result.profile.display_name}
+                    </span>
+                  </div>
+                )}
+                {result.profile.email && (
+                  <div>
+                    <span className="text-white/45">Email:</span>{" "}
+                    <span className="text-amber-200">
+                      {result.profile.email}
+                    </span>
+                  </div>
+                )}
+                {result.profile.id && (
+                  <div>
+                    <span className="text-white/45">Spotify ID:</span>{" "}
+                    <span className="text-white/70">{result.profile.id}</span>
+                  </div>
+                )}
+                {result.profile.country && (
+                  <div>
+                    <span className="text-white/45">Country:</span>{" "}
+                    <span className="text-white/70">
+                      {result.profile.country}
+                    </span>
+                  </div>
+                )}
+              </div>
+              <div className="mt-2 text-[11px] text-white/55">
+                In Dev Mode, this <span className="text-amber-200">email</span>{" "}
+                must appear on the User Management list at{" "}
+                <a
+                  href="https://developer.spotify.com/dashboard"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="underline hover:text-white/80"
+                >
+                  developer.spotify.com/dashboard
+                </a>
+                .
+              </div>
+            </div>
+          )}
           {result.missing.length === 0 ? (
             <div className="flex items-center gap-2 rounded-lg border border-neon-green/30 bg-neon-green/[0.06] px-3 py-2 text-neon-green">
               <Check className="h-3.5 w-3.5" />

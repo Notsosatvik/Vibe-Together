@@ -185,6 +185,12 @@ export type SpotifyDiagnoseResult = {
   granted: string[];
   requested: string[];
   missing: string[];
+  profile?: {
+    id: string | null;
+    email: string | null;
+    display_name: string | null;
+    country: string | null;
+  };
 };
 export async function diagnoseSpotify(): Promise<SpotifyDiagnoseResult> {
   return apiFetch<SpotifyDiagnoseResult>("/spotify/diagnose");

@@ -309,14 +309,60 @@ spotifyRouter.get("/diagnose", requireAuth, async (req, res, next) => {
         revoked: isRevoked,
       });
     }
-    const tokens = (await r.json()) as { scope?: string };
+    const tokens = (await r.json()) as { scope?: string; access_token?: string };
     const granted = (tokens.scope ?? "").split(" ").filter(Boolean);
     const requested = SPOTIFY_SCOPES.split(" ").filter(Boolean);
     const missing = requested.filter((s) => !granted.includes(s));
+
+    // Also fetch /me with the fresh access token so we can return the
+    // *actual* email Spotify has on file for this account. The User
+    // Management list at developer.spotify.com is matched on this email —
+    // if a user adds the wrong email (e.g. their Google email instead of
+    // their Spotify email), every API call still 403s in Dev Mode. Showing
+    // this directly in the UI eliminates the guesswork.
+    let profileEmail: string | null = null;
+    let profileId: string | null = null;
+    let profileDisplayName: string | null = null;
+    let profileCountry: string | null = null;
+    if (tokens.access_token) {
+      try {
+        const meRes = await fetch("https://api.spotify.com/v1/me", {
+          headers: { Authorization: `Bearer ${tokens.access_token}` },
+        });
+        if (meRes.ok) {
+          const me = (await meRes.json()) as {
+            id?: string;
+            email?: string;
+            display_name?: string;
+            country?: string;
+          };
+          profileEmail = me.email ?? null;
+          profileId = me.id ?? null;
+          profileDisplayName = me.display_name ?? null;
+          profileCountry = me.country ?? null;
+        } else {
+          console.warn(`[spotify:diagnose] /me failed ${meRes.status}`);
+        }
+      } catch (e) {
+        console.warn(`[spotify:diagnose] /me threw: ${(e as Error).message}`);
+      }
+    }
+
     console.log(
-      `[spotify:diagnose] userId=${req.user!.sub} granted=[${granted.join(",")}] missing=[${missing.join(",")}]`,
+      `[spotify:diagnose] userId=${req.user!.sub} spotifyId=${profileId} ` +
+        `email=${profileEmail} granted=[${granted.join(",")}] missing=[${missing.join(",")}]`,
     );
-    res.json({ granted, requested, missing });
+    res.json({
+      granted,
+      requested,
+      missing,
+      profile: {
+        id: profileId,
+        email: profileEmail,
+        display_name: profileDisplayName,
+        country: profileCountry,
+      },
+    });
   } catch (err) {
     next(err);
   }
