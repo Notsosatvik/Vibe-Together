@@ -58,14 +58,38 @@ export function useSpotifyPlayer(enabled: boolean) {
   const [error, setError] = useState<string | null>(null);
   const playerRef = useRef<SpotifyPlayerLike | null>(null);
   const tokenRef = useRef<string | null>(null);
+  // Mirror of `status` for use inside setTimeout/event handlers where we
+  // don't want to depend on a possibly-stale closure.
+  const statusRef = useRef<PlayerStatus>("idle");
 
   useEffect(() => {
     if (!enabled) return;
     let cancelled = false;
+    statusRef.current = "loading";
     setStatus("loading");
+    setError(null);
+
+    const applyStatus = (next: PlayerStatus, err?: string | null) => {
+      statusRef.current = next;
+      setStatus(next);
+      if (err !== undefined) setError(err);
+    };
+
+    // Hard ceiling: if we haven't flipped to ready / no-premium / error within
+    // 15 seconds, surface a timeout so the user isn't left staring at a spinner.
+    const timeoutId = window.setTimeout(() => {
+      if (cancelled) return;
+      if (statusRef.current === "loading") {
+        applyStatus(
+          "error",
+          "Spotify took too long to start. This usually means an ad-blocker or extension is blocking sdk.scdn.co — try a different browser or disable extensions for this tab."
+        );
+      }
+    }, 15000);
 
     (async () => {
       try {
+        console.info("[spotify-player] fetching /spotify/token …");
         // Fetch initial token + product info. /spotify/token refreshes if needed.
         const { access_token, product } = await apiFetch<{
           access_token: string;
@@ -73,16 +97,18 @@ export function useSpotifyPlayer(enabled: boolean) {
         }>("/spotify/token");
 
         if (cancelled) return;
+        console.info("[spotify-player] got token, product =", product);
         if (product !== "premium") {
-          setStatus("no-premium");
-          setError("Spotify Premium required to play full tracks.");
+          applyStatus("no-premium", "Spotify Premium required to play full tracks.");
           return;
         }
         tokenRef.current = access_token;
 
+        console.info("[spotify-player] loading SDK script …");
         await loadSdk();
         if (cancelled) return;
         if (!window.Spotify) throw new Error("Spotify SDK didn't load");
+        console.info("[spotify-player] SDK loaded, creating Player");
 
         const player = new window.Spotify.Player({
           name: "VibeTogether",
@@ -94,7 +120,8 @@ export function useSpotifyPlayer(enabled: boolean) {
                 tokenRef.current = t.access_token;
                 cb(t.access_token);
               })
-              .catch(() => {
+              .catch((err) => {
+                console.warn("[spotify-player] token refresh failed", err);
                 if (tokenRef.current) cb(tokenRef.current);
               });
           },
@@ -103,43 +130,61 @@ export function useSpotifyPlayer(enabled: boolean) {
         player.addListener("ready", (data) => {
           const d = data as { device_id: string };
           if (cancelled) return;
+          console.info("[spotify-player] ready, device_id =", d.device_id);
           setDeviceId(d.device_id);
-          setStatus("ready");
+          applyStatus("ready", null);
         });
-        player.addListener("not_ready", () => {
-          // Device went offline (tab backgrounded too long, etc.)
+        player.addListener("not_ready", (data) => {
+          console.warn("[spotify-player] not_ready", data);
         });
         player.addListener("initialization_error", (data) => {
           const d = data as { message?: string };
-          setError(d.message ?? "Init error");
-          setStatus("error");
+          console.error("[spotify-player] initialization_error", d);
+          applyStatus("error", d.message ?? "Init error");
         });
         player.addListener("authentication_error", (data) => {
           const d = data as { message?: string };
-          setError(d.message ?? "Auth error");
-          setStatus("error");
+          console.error("[spotify-player] authentication_error", d);
+          applyStatus(
+            "error",
+            d.message ??
+              "Spotify rejected the access token. Try disconnecting and reconnecting Spotify from your account page."
+          );
         });
-        player.addListener("account_error", () => {
-          setStatus("no-premium");
-          setError("Spotify Premium required.");
+        player.addListener("account_error", (data) => {
+          console.error("[spotify-player] account_error", data);
+          applyStatus("no-premium", "Spotify Premium required.");
         });
         player.addListener("playback_error", (data) => {
           // Non-fatal — log only.
-          console.warn("Spotify playback error", data);
+          console.warn("[spotify-player] playback_error", data);
         });
 
+        console.info("[spotify-player] connecting …");
         const connected = await player.connect();
+        console.info("[spotify-player] player.connect() returned", connected);
         if (!connected) throw new Error("Couldn't connect to Spotify");
         playerRef.current = player;
       } catch (e) {
         if (cancelled) return;
-        setStatus("error");
-        setError((e as Error).message ?? "Spotify SDK error");
+        const msg = (e as Error).message ?? "Spotify SDK error";
+        console.error("[spotify-player] setup failed:", msg, e);
+        // Common case: user landed on the room before completing the Spotify
+        // OAuth — make the path forward obvious.
+        if (/spotify.+not.+connected/i.test(msg) || /409/.test(msg)) {
+          applyStatus(
+            "error",
+            "Your Spotify account isn't connected yet. Open your account page and click \"Connect Spotify\"."
+          );
+        } else {
+          applyStatus("error", msg);
+        }
       }
     })();
 
     return () => {
       cancelled = true;
+      window.clearTimeout(timeoutId);
       if (playerRef.current) {
         playerRef.current.disconnect();
         playerRef.current = null;

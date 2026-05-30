@@ -1,11 +1,16 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { AlertTriangle, Loader2, Volume2 } from "lucide-react";
-import { useSpotifyPlayer, playTrackOnDevice, pausePlayback, seekPlayback } from "@/lib/hooks/use-spotify-player";
+import { AlertTriangle, CheckCircle2, Loader2, Volume2, Wifi, WifiOff } from "lucide-react";
+import { useSpotifyPlayer, playTrackOnDevice, pausePlayback } from "@/lib/hooks/use-spotify-player";
 import { getSocket, computeTargetPosition, type PlaybackState, type QueueItemDTO, type RoomStateDTO } from "@/lib/socket";
 import { SearchPanel } from "./search-panel";
 import { NowPlaying, QueueList } from "./now-playing";
+
+type SocketStatus =
+  | { kind: "connecting" }
+  | { kind: "joined" }
+  | { kind: "error"; message: string };
 
 /**
  * Owns the entire room playback experience for a logged-in, Spotify-connected user.
@@ -32,7 +37,7 @@ export function RoomPlayer({
 
   const [playback, setPlayback] = useState<PlaybackState>(initialPlayback);
   const [queue, setQueue] = useState<QueueItemDTO[]>(initialQueue);
-  const [joined, setJoined] = useState(false);
+  const [socketStatus, setSocketStatus] = useState<SocketStatus>({ kind: "connecting" });
 
   // Track the last (trackUri,isPlaying) pair we asked our local Spotify to play
   // so we don't keep re-issuing the same play command on every state tick.
@@ -46,15 +51,50 @@ export function RoomPlayer({
   // -------------------------------------------------------------------------
   useEffect(() => {
     const sock = getSocket();
+    let joinTimer: number | null = null;
+    let acked = false;
+
     const onJoin = () => {
+      console.info("[room-player] socket connected, sending room:join", { roomId });
       sock.emit("room:join", { roomId }, (state: RoomStateDTO) => {
-        setPlayback(state.playback);
-        setQueue(state.queue);
-        setJoined(true);
+        acked = true;
+        if (joinTimer) window.clearTimeout(joinTimer);
+        console.info("[room-player] room:join ack", state);
+        if (state && state.playback) setPlayback(state.playback);
+        if (state && state.queue) setQueue(state.queue);
+        setSocketStatus({ kind: "joined" });
+      });
+      // If the server never acks the join (handler missing, error swallowed),
+      // we don't want to sit in "connecting" forever.
+      joinTimer = window.setTimeout(() => {
+        if (!acked) {
+          console.warn("[room-player] room:join timed out after 8s");
+          setSocketStatus({
+            kind: "error",
+            message: "The room server didn't respond. We'll keep retrying in the background.",
+          });
+        }
+      }, 8000);
+    };
+
+    const onConnectError = (err: Error) => {
+      console.warn("[room-player] socket connect_error", err);
+      setSocketStatus({
+        kind: "error",
+        message: err.message || "Couldn't reach the room server.",
       });
     };
+
+    const onDisconnect = (reason: string) => {
+      console.warn("[room-player] socket disconnected", reason);
+      // Don't flip back to "connecting" — socket.io auto-reconnects and onJoin
+      // will fire again on reconnect.
+    };
+
     if (sock.connected) onJoin();
     else sock.on("connect", onJoin);
+    sock.on("connect_error", onConnectError);
+    sock.on("disconnect", onDisconnect);
 
     const onState = (s: PlaybackState) => setPlayback(s);
     const onQueue = ({ items }: { items: QueueItemDTO[] }) => setQueue(items);
@@ -71,7 +111,10 @@ export function RoomPlayer({
     sock.on("playback:tick", onTick);
 
     return () => {
+      if (joinTimer) window.clearTimeout(joinTimer);
       sock.off("connect", onJoin);
+      sock.off("connect_error", onConnectError);
+      sock.off("disconnect", onDisconnect);
       sock.off("playback:state", onState);
       sock.off("queue:update", onQueue);
       sock.off("playback:tick", onTick);
@@ -166,7 +209,8 @@ export function RoomPlayer({
   // -------------------------------------------------------------------------
   return (
     <div className="space-y-4">
-      <PlayerStatusBanner status={playerStatus} error={playerError} joined={joined} />
+      <SpotifyPlayerBanner status={playerStatus} error={playerError} />
+      <LiveSyncBanner status={socketStatus} />
 
       <NowPlaying
         playback={playback}
@@ -194,27 +238,34 @@ export function RoomPlayer({
   );
 }
 
-function PlayerStatusBanner({
+/**
+ * Status banner #1 — the Spotify Web Playback SDK state in THIS tab.
+ * Tells the user whether audio will actually play here.
+ */
+function SpotifyPlayerBanner({
   status,
   error,
-  joined,
 }: {
   status: "idle" | "loading" | "ready" | "no-premium" | "error";
   error: string | null;
-  joined: boolean;
 }) {
-  if (status === "loading" || (!joined && status !== "no-premium")) {
+  if (status === "loading" || status === "idle") {
     return (
       <div className="flex items-center gap-3 rounded-xl bg-white/[0.03] border border-white/8 px-4 py-3 text-sm text-white/65">
         <Loader2 className="h-4 w-4 animate-spin text-neon-green" />
-        Connecting your Spotify player…
+        <div className="min-w-0">
+          <div className="font-medium text-white/80">Starting Spotify player…</div>
+          <div className="text-xs text-white/45">
+            Loading the Web Playback SDK in this tab.
+          </div>
+        </div>
       </div>
     );
   }
   if (status === "ready") {
     return (
       <div className="flex items-center gap-3 rounded-xl border border-neon-green/30 bg-neon-green/[0.06] px-4 py-3 text-sm">
-        <Volume2 className="h-4 w-4 text-neon-green" />
+        <Volume2 className="h-4 w-4 text-neon-green shrink-0" />
         <div>
           <div className="font-medium">Your Spotify is the speaker.</div>
           <div className="text-xs text-white/55">
@@ -227,11 +278,11 @@ function PlayerStatusBanner({
   if (status === "no-premium") {
     return (
       <div className="flex items-center gap-3 rounded-xl border border-amber-400/30 bg-amber-400/[0.06] px-4 py-3 text-sm">
-        <AlertTriangle className="h-4 w-4 text-amber-300" />
+        <AlertTriangle className="h-4 w-4 text-amber-300 shrink-0" />
         <div>
           <div className="font-medium">Spotify Premium required for playback.</div>
           <div className="text-xs text-white/55">
-            You can still chat and follow the room — but audio needs Premium.
+            You can still see what&apos;s playing and follow the room — but audio needs Premium.
           </div>
         </div>
       </div>
@@ -239,13 +290,55 @@ function PlayerStatusBanner({
   }
   return (
     <div className="flex items-center gap-3 rounded-xl border border-rose-400/30 bg-rose-400/[0.06] px-4 py-3 text-sm">
-      <AlertTriangle className="h-4 w-4 text-rose-300" />
-      <div className="min-w-0">
+      <AlertTriangle className="h-4 w-4 text-rose-300 shrink-0" />
+      <div className="min-w-0 flex-1">
         <div className="font-medium">Couldn&apos;t start the Spotify player.</div>
-        <div className="text-xs text-white/55 truncate">
+        <div className="text-xs text-white/55 break-words">
           {error ?? "Unknown error"}
         </div>
       </div>
+      <button
+        onClick={() => window.location.reload()}
+        className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs hover:bg-white/10 transition-colors shrink-0"
+      >
+        Retry
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Status banner #2 — the realtime room socket. Separate from the SDK so a
+ * stuck socket doesn't masquerade as a stuck Spotify player (or vice versa).
+ */
+function LiveSyncBanner({ status }: { status: SocketStatus }) {
+  if (status.kind === "joined") {
+    return (
+      <div className="flex items-center gap-2 rounded-xl border border-white/8 bg-white/[0.025] px-4 py-2 text-xs text-white/60">
+        <CheckCircle2 className="h-3.5 w-3.5 text-neon-green" />
+        <Wifi className="h-3.5 w-3.5 text-white/45" />
+        <span>Live sync connected.</span>
+      </div>
+    );
+  }
+  if (status.kind === "connecting") {
+    return (
+      <div className="flex items-center gap-2 rounded-xl bg-white/[0.025] border border-white/8 px-4 py-2 text-xs text-white/60">
+        <Loader2 className="h-3.5 w-3.5 animate-spin text-white/60" />
+        <span>Joining the live room…</span>
+      </div>
+    );
+  }
+  return (
+    <div className="flex items-center gap-2 rounded-xl border border-amber-400/30 bg-amber-400/[0.06] px-4 py-2 text-xs text-amber-200/90">
+      <WifiOff className="h-3.5 w-3.5 text-amber-300" />
+      <span className="flex-1">{status.message}</span>
+      <button
+        onClick={() => window.location.reload()}
+        className="rounded-md border border-amber-300/30 bg-amber-300/10 px-2 py-0.5 text-[11px] hover:bg-amber-300/20 transition-colors"
+      >
+        Reload
+      </button>
     </div>
   );
 }
