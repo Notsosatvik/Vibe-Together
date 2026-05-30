@@ -31,7 +31,7 @@ type ApiUserMini = {
 
 type ApiParticipant = {
   id: string;
-  role: "HOST" | "CO_HOST" | "LISTENER";
+  role: "HOST" | "COHOST" | "LISTENER";
   user: ApiUserMini;
 };
 

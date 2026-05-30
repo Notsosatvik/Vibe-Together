@@ -1,4 +1,6 @@
 FROM node:20-slim AS base
+# Cache-bust marker: bump this string to force a clean Railway redeploy when
+# webhooks didn't pick up a previous push. Current: player-v2-2026-05-30
 RUN apt-get update -y && apt-get install -y openssl ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 ENV NODE_ENV=production

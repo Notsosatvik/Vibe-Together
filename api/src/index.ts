@@ -65,7 +65,18 @@ app.use(
   })
 );
 
-app.get("/health", (_req, res) => res.json({ ok: true, ts: Date.now() }));
+// Build marker — bumped whenever we want to confirm a specific deploy
+// reached production. Visible via /health.
+const BUILD_MARKER = "player-v2";
+
+app.get("/health", (_req, res) =>
+  res.json({
+    ok: true,
+    ts: Date.now(),
+    build: BUILD_MARKER,
+    routes: ["/spotify/token", "/spotify/search", "/auth/spotify/callback"],
+  })
+);
 
 app.use("/auth", authRouter);
 app.use("/spotify", spotifyRouter);
@@ -75,6 +86,10 @@ app.use("/spotify", spotifyRouter);
 app.use("/auth/spotify", spotifyRouter);
 app.use("/rooms", roomsRouter);
 app.use("/users", usersRouter);
+
+console.log(
+  `[boot] mounted routers — build=${BUILD_MARKER} — /auth, /spotify, /auth/spotify, /rooms, /users`
+);
 
 app.use(errorHandler);
 
