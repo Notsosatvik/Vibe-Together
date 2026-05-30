@@ -407,8 +407,10 @@ spotifyRouter.get("/search", requireAuth, async (req, res, next) => {
       throw new Error("Spotify not connected. Reconnect from your account page.");
     });
 
+    // Feb 2026 migration: search `limit` max was reduced from 50/default 20
+    // to 10/default 5. Asking for 20 now returns a 400 Bad Request.
     const r = await fetch(
-      `https://api.spotify.com/v1/search?type=track&limit=20&q=${encodeURIComponent(q)}`,
+      `https://api.spotify.com/v1/search?type=track&limit=10&q=${encodeURIComponent(q)}`,
       { headers: { Authorization: `Bearer ${token}` } },
     );
 
@@ -435,15 +437,28 @@ spotifyRouter.get("/search", requireAuth, async (req, res, next) => {
   }
 });
 
-// Playlist tracks proxy — moved server-side so we get full diagnostic logging
+// Playlist items proxy — moved server-side so we get full diagnostic logging
 // when Spotify returns errors. The browser-side version was hiding crucial
 // detail (WWW-Authenticate headers, full error body) and CORS was eating
-// some response info, making 403s opaque.
+// some response info.
 //
-// Logs:
-//   - playlist owner (so we can confirm Spotify-owned vs user-owned)
-//   - any failure status with full body + www-authenticate
-//   - request URL with field selector
+// Feb 2026 Spotify Web API migration: the old GET /v1/playlists/{id}/tracks
+// endpoint was REMOVED and replaced with GET /v1/playlists/{id}/items. The
+// old path returns 403 Forbidden (not 404 — Spotify's choice, confusingly)
+// for Dev Mode apps that haven't migrated. The response shape also changed:
+//   old:  { items: [{ track: {...} }] }
+//   new:  { items: [{ item:  {...} }] }
+// Playlist metadata's `tracks` field was likewise renamed to `items`, so
+// fields=tracks(total) → fields=items(total).
+//
+// We keep our outward-facing path /spotify/playlists/:id/tracks and the
+// {track:...} response shape so the frontend hook doesn't need changes —
+// just rewrite the upstream call and unwrap items[].item → items[].track
+// on the way back.
+//
+// Refs:
+//   https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide
+//   https://developer.spotify.com/documentation/web-api/references/changes/february-2026
 spotifyRouter.get("/playlists/:id/tracks", requireAuth, async (req, res, next) => {
   try {
     const playlistId = String(req.params.id);
@@ -461,15 +476,14 @@ spotifyRouter.get("/playlists/:id/tracks", requireAuth, async (req, res, next) =
     const mySpotifyId = user?.spotifyId ?? null;
 
     const token = await refreshSpotifyTokenForUser(req.user!.sub).catch((e) => {
-      console.warn("[spotify:playlist-tracks] token refresh failed:", (e as Error).message);
+      console.warn("[spotify:playlist-items] token refresh failed:", (e as Error).message);
       throw new Error("Spotify not connected. Reconnect from your account page.");
     });
 
-    // First, fetch the playlist metadata so we can log who owns it. Spotify
-    // returns 403 on /tracks for some Spotify-owned editorial playlists even
-    // when the user "follows" them (Nov 2024 Web API deprecation). Knowing
-    // the owner tells us whether it's that case vs an account-level issue.
-    const metaUrl = `https://api.spotify.com/v1/playlists/${encodeURIComponent(playlistId)}?fields=id,name,owner(id,display_name),public,collaborative,tracks(total)`;
+    // Playlist metadata (post-Feb-2026 field names — `items.total` instead
+    // of `tracks.total`). Spotify returns null items only for playlists the
+    // user owns/collaborates on, otherwise the playlist itself still 200s.
+    const metaUrl = `https://api.spotify.com/v1/playlists/${encodeURIComponent(playlistId)}?fields=id,name,owner(id,display_name),public,collaborative,items(total)`;
     const metaRes = await fetch(metaUrl, {
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -480,72 +494,84 @@ spotifyRouter.get("/playlists/:id/tracks", requireAuth, async (req, res, next) =
         name?: string;
         public?: boolean;
         collaborative?: boolean;
-        tracks?: { total?: number };
+        items?: { total?: number };
       };
       ownerId = meta.owner?.id ?? null;
       console.log(
-        `[spotify:playlist-tracks] playlistId=${playlistId} name="${meta.name}" owner=${ownerId} ` +
+        `[spotify:playlist-items] playlistId=${playlistId} name="${meta.name}" owner=${ownerId} ` +
           `displayName="${meta.owner?.display_name ?? ""}" public=${meta.public} ` +
-          `collaborative=${meta.collaborative} total=${meta.tracks?.total ?? "?"}`,
+          `collaborative=${meta.collaborative} total=${meta.items?.total ?? "?"}`,
       );
     } else {
       const metaBody = await metaRes.text().catch(() => "");
       const metaAuth = metaRes.headers.get("www-authenticate") ?? "";
       console.warn(
-        `[spotify:playlist-tracks] meta ${metaRes.status} ${playlistId}` +
+        `[spotify:playlist-items] meta ${metaRes.status} ${playlistId}` +
           (metaAuth ? ` www-authenticate="${metaAuth}"` : "") +
           ` body=${metaBody.slice(0, 300)}`,
       );
     }
 
-    const tracksUrl = `https://api.spotify.com/v1/playlists/${encodeURIComponent(playlistId)}/tracks?limit=100&fields=items(track(uri,name,duration_ms,artists(name),album(name,images)))`;
-    const tracksRes = await fetch(tracksUrl, {
+    // NEW endpoint + NEW field selector. The wrapper key is `item`, not
+    // `track`. We translate back to `track` below before responding so the
+    // frontend doesn't have to know about the migration.
+    const itemsUrl = `https://api.spotify.com/v1/playlists/${encodeURIComponent(playlistId)}/items?limit=100&fields=items(item(uri,name,duration_ms,artists(name),album(name,images)))`;
+    const itemsRes = await fetch(itemsUrl, {
       headers: { Authorization: `Bearer ${token}` },
     });
 
-    if (!tracksRes.ok) {
-      const body = await tracksRes.text().catch(() => "");
-      const wwwAuth = tracksRes.headers.get("www-authenticate") ?? "";
+    if (!itemsRes.ok) {
+      const body = await itemsRes.text().catch(() => "");
+      const wwwAuth = itemsRes.headers.get("www-authenticate") ?? "";
       console.warn(
-        `[spotify:playlist-tracks] tracks ${tracksRes.status} ${playlistId} owner=${ownerId}` +
+        `[spotify:playlist-items] items ${itemsRes.status} ${playlistId} owner=${ownerId}` +
           (wwwAuth ? ` www-authenticate="${wwwAuth}"` : "") +
           ` body=${body.slice(0, 500)}`,
       );
-      let parsedMessage = `Spotify returned ${tracksRes.status}`;
+      let parsedMessage = `Spotify returned ${itemsRes.status}`;
       try {
         const parsed = JSON.parse(body) as { error?: { message?: string } };
         if (parsed?.error?.message) parsedMessage = `Spotify: ${parsed.error.message}`;
       } catch { /* not JSON */ }
       const ownedByMe = ownerId && mySpotifyId && ownerId === mySpotifyId;
       const friendly =
-        tracksRes.status === 403 && ownerId === "spotify"
-          ? "This is a Spotify editorial playlist. New apps in Development Mode can no longer access its tracks (Web API deprecation, Nov 2024). Try one of your own playlists instead."
-          : tracksRes.status === 401
+        itemsRes.status === 401
           ? "Spotify token expired. Reconnect from settings."
-          : tracksRes.status === 403 && ownedByMe
-          ? "Your account owns this playlist and all scopes are granted — yet Spotify is still refusing. This is almost certainly because the VibeTogether app is in Development Mode and your Spotify email isn't on the User Management list. Add it at developer.spotify.com/dashboard."
-          : tracksRes.status === 403
-          ? `You don't own this playlist — its owner is "${ownerId ?? "unknown"}", not your Spotify account (${mySpotifyId ?? "unknown"}). Spotify is blocking access to other users' private playlists. Try one of your own playlists.`
+          : itemsRes.status === 403 && ownerId === "spotify"
+          ? "This is a Spotify editorial playlist. Dev Mode apps no longer have access to Spotify-owned playlists. Try one of your own."
+          : itemsRes.status === 403 && !ownedByMe
+          ? `You don't own this playlist (owner: "${ownerId ?? "unknown"}"). Spotify only returns contents for playlists you own or collaborate on. Try one of your own.`
           : parsedMessage;
       console.warn(
-        `[spotify:playlist-tracks] ${tracksRes.status} mine=${mySpotifyId} owner=${ownerId} ownedByMe=${ownedByMe}`,
+        `[spotify:playlist-items] ${itemsRes.status} mine=${mySpotifyId} owner=${ownerId} ownedByMe=${ownedByMe}`,
       );
       return res
-        .status(tracksRes.status === 401 ? 401 : 502)
+        .status(itemsRes.status === 401 ? 401 : 502)
         .json({
           error: friendly,
           ownerId,
           mySpotifyId,
           ownedByMe,
-          upstream_status: tracksRes.status,
+          upstream_status: itemsRes.status,
         });
     }
 
-    const data = (await tracksRes.json()) as { items?: unknown[] };
+    // Translate Feb-2026 shape `{ items: [{ item: {...} }] }` back to the
+    // legacy `{ items: [{ track: {...} }] }` the frontend already handles.
+    const raw = (await itemsRes.json()) as {
+      items?: Array<{ item?: unknown; track?: unknown }>;
+    };
+    const translated = {
+      items: (raw.items ?? []).map((row) => ({
+        // Some clients/regions may still return `track` for a transition
+        // period — accept either, prefer `item` (the new field).
+        track: row.item ?? row.track ?? null,
+      })),
+    };
     console.log(
-      `[spotify:playlist-tracks] OK playlistId=${playlistId} → ${data.items?.length ?? 0} items`,
+      `[spotify:playlist-items] OK playlistId=${playlistId} → ${translated.items.length} items`,
     );
-    res.json(data);
+    res.json(translated);
   } catch (err) {
     next(err);
   }
