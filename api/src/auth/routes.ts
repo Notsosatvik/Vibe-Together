@@ -1,9 +1,10 @@
 import { Router } from "express";
 import crypto from "node:crypto";
+import jwt from "jsonwebtoken";
 import { z } from "zod";
 import { env } from "../lib/env.js";
 import { prisma } from "../lib/prisma.js";
-import { signAccessToken, signRefreshToken, verifyRefreshToken } from "../lib/jwt.js";
+import { signAccessToken, signRefreshToken, verifyAccessToken, verifyRefreshToken } from "../lib/jwt.js";
 
 export const authRouter = Router();
 
@@ -118,7 +119,12 @@ authRouter.get("/google/callback", async (req, res, next) => {
 
     // If user hasn't connected Spotify, send them to onboarding
     const dest = user.spotifyId ? "/dashboard" : "/onboarding";
-    res.redirect(`${env.WEB_ORIGIN}${dest}`);
+    // Also pass tokens via URL fragment as a fallback for browsers that
+    // block third-party cookies (Safari ITP, Brave, Chrome Incognito, etc.).
+    // Fragments are NOT sent to the server. The web app reads & strips them
+    // on mount, stores in localStorage, and sends as Authorization header.
+    const fragment = new URLSearchParams({ a: accessToken, r: refreshToken }).toString();
+    res.redirect(`${env.WEB_ORIGIN}${dest}#${fragment}`);
   } catch (err) {
     next(err);
   }
@@ -129,7 +135,12 @@ authRouter.get("/google/callback", async (req, res, next) => {
 // =========================================
 authRouter.post("/refresh", async (req, res, next) => {
   try {
-    const token = (req.cookies?.refresh_token as string | undefined) ?? "";
+    // Accept refresh token from cookie OR body (cross-site cookie fallback).
+    const bodyToken =
+      req.body && typeof req.body === "object" && typeof (req.body as { refresh_token?: unknown }).refresh_token === "string"
+        ? ((req.body as { refresh_token: string }).refresh_token)
+        : "";
+    const token = (req.cookies?.refresh_token as string | undefined) ?? bodyToken ?? "";
     if (!token) return res.status(401).json({ error: "No refresh token" });
 
     const claims = verifyRefreshToken(token);
@@ -162,9 +173,38 @@ authRouter.post("/refresh", async (req, res, next) => {
     res.cookie("access_token", access, { ...crossSiteCookie, maxAge: 15 * 60 * 1000 });
     res.cookie("refresh_token", newRefresh, { ...crossSiteCookie, maxAge: 30 * 24 * 60 * 60 * 1000 });
 
-    res.json({ ok: true });
+    // Also return tokens in the body so callers using the header-based fallback
+    // (no third-party cookies) can keep them in localStorage.
+    res.json({ ok: true, access_token: access, refresh_token: newRefresh });
   } catch (err) {
     next(err);
+  }
+});
+
+// =========================================
+// One-time auth ticket — for top-level navigations that can't send Authorization
+// headers (e.g. /spotify/connect). Frontend mints a ticket via this endpoint
+// (using its Bearer token), then navigates to /spotify/connect?ticket=<t>.
+// Tickets are short-lived JWTs signed with the access secret.
+// =========================================
+authRouter.post("/ticket", (req, res) => {
+  try {
+    const header = req.headers.authorization;
+    const cookieToken = (req.cookies?.access_token as string | undefined) ?? "";
+    const token = header?.startsWith("Bearer ") ? header.slice(7) : cookieToken;
+    if (!token) return res.status(401).json({ error: "Unauthorized" });
+
+    // Verify the user's access token, then mint a 60-second ticket containing
+    // just the user id. The ticket is single-use logically (short TTL only).
+    const claims = verifyAccessToken(token);
+    const ticket = jwt.sign(
+      { sub: claims.sub, kind: "ticket" },
+      env.JWT_SECRET,
+      { expiresIn: 60 } as { expiresIn: number }
+    );
+    res.json({ ticket });
+  } catch {
+    res.status(401).json({ error: "Invalid token" });
   }
 });
 

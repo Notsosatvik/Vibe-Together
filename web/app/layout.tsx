@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
+import { TokenBootstrap } from "@/components/auth/token-bootstrap";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -34,6 +35,7 @@ export default function RootLayout({
   return (
     <html lang="en" className={`${inter.variable} dark`}>
       <body className="font-sans antialiased text-white selection:bg-neon-green/30">
+        <TokenBootstrap />
         {children}
       </body>
     </html>

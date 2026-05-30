@@ -1,8 +1,10 @@
 import { Router } from "express";
 import crypto from "node:crypto";
+import jwt from "jsonwebtoken";
 import { env } from "../lib/env.js";
 import { prisma } from "../lib/prisma.js";
 import { requireAuth } from "../middleware/auth.js";
+import { verifyAccessToken } from "../lib/jwt.js";
 
 export const spotifyRouter = Router();
 
@@ -27,7 +29,32 @@ const SPOTIFY_SCOPES = [
 ].join(" ");
 
 // Kick off Spotify OAuth — user is already signed in with Google.
-spotifyRouter.get("/connect", requireAuth, (req, res) => {
+// Auth can come from: cookie, Bearer header, or a one-time ?ticket= query
+// param (used by top-level navigations when third-party cookies are blocked).
+spotifyRouter.get("/connect", (req, res, next) => {
+  // If a ticket is provided, verify it and treat the bearer as authenticated.
+  const ticket = typeof req.query.ticket === "string" ? req.query.ticket : "";
+  if (ticket) {
+    try {
+      const claims = jwt.verify(ticket, env.JWT_SECRET) as {
+        sub: string;
+        kind?: string;
+      };
+      if (claims.kind !== "ticket") throw new Error("Not a ticket");
+      // Stamp req.user so the handler below can use it like the cookie path.
+      (req as typeof req & { user: { sub: string; email: string; handle: string } }).user = {
+        sub: claims.sub,
+        email: "",
+        handle: "",
+      };
+      return next();
+    } catch {
+      return res.status(401).json({ error: "Invalid ticket" });
+    }
+  }
+  // Otherwise fall through to the cookie/Bearer path.
+  return requireAuth(req, res, next);
+}, (req, res) => {
   if (!env.SPOTIFY_CLIENT_ID || !env.SPOTIFY_REDIRECT_URI) {
     return res.status(500).json({ error: "Spotify not configured" });
   }
