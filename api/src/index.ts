@@ -69,6 +69,10 @@ app.get("/health", (_req, res) => res.json({ ok: true, ts: Date.now() }));
 
 app.use("/auth", authRouter);
 app.use("/spotify", spotifyRouter);
+// Also expose the spotify routes under /auth/spotify/* — the SPOTIFY_REDIRECT_URI
+// configured in the Spotify Dashboard is /auth/spotify/callback, so the callback
+// must be reachable there too.
+app.use("/auth/spotify", spotifyRouter);
 app.use("/rooms", roomsRouter);
 app.use("/users", usersRouter);
 
