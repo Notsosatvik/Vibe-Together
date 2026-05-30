@@ -6,6 +6,7 @@ import { verifyAccessToken } from "../lib/jwt.js";
 import { prisma } from "../lib/prisma.js";
 import { env } from "../lib/env.js";
 import { loadPlayback, projectedPosition, savePlayback } from "./sync.js";
+import { refreshSpotifyTokenForUser } from "../spotify/routes.js";
 import type {
   ClientToServerEvents,
   ServerToClientEvents,
@@ -17,8 +18,21 @@ type IO = Server<ClientToServerEvents, ServerToClientEvents, {}, SocketData>;
 type S = Socket<ClientToServerEvents, ServerToClientEvents, {}, SocketData>;
 
 export function initSocketServer(httpServer: http.Server): IO {
+  const allowedOrigins = (origin: string | undefined): boolean => {
+    if (!origin) return true;
+    if (origin === env.WEB_ORIGIN) return true;
+    if (/^http:\/\/localhost:\d+$/.test(origin)) return true;
+    if (/^https:\/\/vibe-together(-[a-z0-9-]+)?\.vercel\.app$/.test(origin)) return true;
+    return false;
+  };
   const io: IO = new Server(httpServer, {
-    cors: { origin: env.WEB_ORIGIN, credentials: true },
+    cors: {
+      origin: (origin, cb) => {
+        if (allowedOrigins(origin)) return cb(null, true);
+        cb(new Error(`CORS: socket origin ${origin} not allowed`), false);
+      },
+      credentials: true,
+    },
     transports: ["websocket", "polling"],
   });
 
@@ -162,6 +176,78 @@ function bindRoom(io: IO, socket: S) {
     await prisma.queueItem.update({ where: { id: next.id }, data: { playedAt: new Date() } });
     await savePlayback(roomId, state);
     io.to(roomId).emit("playback:state", state);
+  });
+
+  socket.on("queue:add", async ({ roomId, trackUri }) => {
+    const userId = socket.data.userId;
+    if (!userId || !trackUri) return;
+    try {
+      // Resolve track metadata from Spotify using the requester's token.
+      const token = await refreshSpotifyTokenForUser(userId);
+      const trackId = trackUri.split(":").pop();
+      const r = await fetch(`https://api.spotify.com/v1/tracks/${trackId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!r.ok) return;
+      const t = (await r.json()) as {
+        name: string;
+        duration_ms: number;
+        artists: { name: string }[];
+        album: { images: { url: string }[] };
+      };
+
+      // Append to the end of the queue.
+      const last = await prisma.queueItem.findFirst({
+        where: { roomId, playedAt: null },
+        orderBy: { position: "desc" },
+      });
+      const created = await prisma.queueItem.create({
+        data: {
+          roomId,
+          trackUri,
+          trackName: t.name,
+          artistName: t.artists.map((a) => a.name).join(", "),
+          albumArtUrl: t.album.images[0]?.url ?? null,
+          durationMs: t.duration_ms,
+          addedById: userId,
+          position: (last?.position ?? 0) + 1,
+        },
+      });
+
+      // Re-broadcast the full live queue so everyone re-renders consistently.
+      const items = await prisma.queueItem.findMany({
+        where: { roomId, playedAt: null },
+        orderBy: { position: "asc" },
+      });
+      io.to(roomId).emit("queue:update", {
+        items: items.map((q) => ({
+          id: q.id,
+          trackUri: q.trackUri,
+          trackName: q.trackName,
+          artistName: q.artistName,
+          albumArtUrl: q.albumArtUrl,
+          durationMs: q.durationMs,
+          addedById: q.addedById,
+          position: q.position,
+        })),
+      });
+
+      // If nothing is currently playing, auto-start with this track so the
+      // host doesn't have to hit play after adding the first song.
+      const playback = await loadPlayback(roomId);
+      if (!playback.trackUri && created.position === 1) {
+        const state = {
+          trackUri,
+          isPlaying: true,
+          positionMs: 0,
+          lastSyncAt: Date.now(),
+        };
+        await savePlayback(roomId, state);
+        io.to(roomId).emit("playback:state", state);
+      }
+    } catch {
+      /* swallow — adding a bad track shouldn't crash the room */
+    }
   });
 
   socket.on("chat:send", async ({ roomId, text }) => {

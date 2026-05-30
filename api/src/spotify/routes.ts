@@ -157,6 +157,30 @@ export async function refreshSpotifyTokenForUser(userId: string): Promise<string
   return tokens.access_token;
 }
 
+// Hand the user's current Spotify access token to the Web Playback SDK.
+// Refreshes the token first if it's about to expire. Premium-only — free
+// users can still call this; the SDK just won't initialize for them.
+spotifyRouter.get("/token", requireAuth, async (req, res, next) => {
+  try {
+    const user = await prisma.user.findUnique({ where: { id: req.user!.sub } });
+    if (!user?.spotifyRefreshToken) {
+      return res.status(409).json({ error: "Spotify not connected" });
+    }
+    const token = await refreshSpotifyTokenForUser(req.user!.sub);
+    const expiresInMs =
+      user.spotifyTokenExpiry && user.spotifyTokenExpiry > new Date()
+        ? user.spotifyTokenExpiry.getTime() - Date.now()
+        : 3500_000;
+    res.json({
+      access_token: token,
+      product: user.spotifyProduct,
+      expires_in_ms: expiresInMs,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // Search proxy — frontend hits this to find tracks for the queue.
 spotifyRouter.get("/search", requireAuth, async (req, res, next) => {
   try {

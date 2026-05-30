@@ -9,7 +9,6 @@ import {
   Check,
   LogOut,
   Users as UsersIcon,
-  Music,
   Share2,
   Crown,
 } from "lucide-react";
@@ -17,10 +16,10 @@ import { GlassCard } from "@/components/ui/glass-card";
 import { Button } from "@/components/ui/button";
 import { Avatar } from "@/components/ui/avatar";
 import { Logo } from "@/components/shared/logo";
-import { Visualizer } from "@/components/shared/visualizer";
 import { apiFetch } from "@/lib/api";
 import { useUserStore } from "@/lib/store/user";
 import { useMe } from "@/lib/hooks/use-me";
+import { RoomPlayer } from "@/components/room/room-player";
 
 type ApiUserMini = {
   id: string;
@@ -36,6 +35,17 @@ type ApiParticipant = {
   user: ApiUserMini;
 };
 
+type ApiQueueItem = {
+  id: string;
+  trackUri: string;
+  trackName: string;
+  artistName: string;
+  albumArtUrl: string | null;
+  durationMs: number;
+  addedById: string;
+  position: number;
+};
+
 type ApiRoom = {
   id: string;
   name: string;
@@ -46,7 +56,7 @@ type ApiRoom = {
   hostId: string;
   host: ApiUserMini;
   participants: ApiParticipant[];
-  queueItems: unknown[];
+  queueItems: ApiQueueItem[];
   createdAt: string;
 };
 
@@ -222,23 +232,28 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
               </div>
             </div>
 
-            <div className="mt-8 rounded-2xl bg-white/[0.03] border border-white/8 p-6">
-              <div className="flex items-center gap-3">
-                <div className="grid h-12 w-12 place-items-center rounded-xl bg-brand-gradient">
-                  <Music className="h-5 w-5 text-ink-950" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm font-medium">Queue is empty</div>
-                  <div className="text-xs text-white/55 mt-0.5">
-                    {isHost
-                      ? "Real-time Spotify playback is coming. For now, this is a synced lobby — share the code with friends."
-                      : "Waiting for the host to start playing."}
-                  </div>
-                </div>
-              </div>
-              <div className="mt-4">
-                <Visualizer className="h-9" />
-              </div>
+            <div className="mt-8">
+              <RoomPlayer
+                roomId={room.id}
+                isHost={isHost}
+                initialPlayback={{
+                  trackUri:
+                    room.queueItems.find((q) => q.position === 1)?.trackUri ?? null,
+                  isPlaying: false,
+                  positionMs: 0,
+                  lastSyncAt: Date.now(),
+                }}
+                initialQueue={room.queueItems.map((q) => ({
+                  id: q.id,
+                  trackUri: q.trackUri,
+                  trackName: q.trackName,
+                  artistName: q.artistName,
+                  albumArtUrl: q.albumArtUrl,
+                  durationMs: q.durationMs,
+                  addedById: q.addedById,
+                  position: q.position,
+                }))}
+              />
             </div>
 
             <div className="mt-6 flex items-center gap-2 rounded-2xl border border-white/8 bg-white/[0.025] px-4 py-3">
