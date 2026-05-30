@@ -21,6 +21,14 @@ type SpotifyPlayerLike = {
   addListener: (event: string, cb: (data: unknown) => void) => void;
   togglePlay: () => Promise<void>;
   getCurrentState: () => Promise<SpotifyPlayerState | null>;
+  // Spotify-provided escape hatch from the browser autoplay policy. The SDK
+  // internally creates an <audio> element on `connect()`, and most browsers
+  // refuse to start that element's playback until they've seen a real user
+  // gesture in the page. activateElement() does that priming for us — but
+  // it MUST be called from inside a click/tap/keydown handler. Calling it
+  // from a useEffect or microtask is a no-op.
+  // Returns a promise that resolves once the element is playable.
+  activateElement?: () => Promise<void>;
 };
 
 declare global {
@@ -306,7 +314,26 @@ export function useSpotifyPlayer(
     }
   }, []);
 
-  return { status, deviceId, error, getCurrentState };
+  // MUST be invoked from inside a user gesture (click/tap/keydown handler).
+  // Resolves once the SDK's internal <audio> element is allowed to play.
+  // Returns false if the SDK doesn't expose activateElement (older builds)
+  // or if the player isn't connected yet — in either case the caller should
+  // still attempt playback; older builds typically auto-activate on play.
+  const activate = useCallback(async (): Promise<boolean> => {
+    const p = playerRef.current;
+    if (!p) return false;
+    if (typeof p.activateElement !== "function") return false;
+    try {
+      await p.activateElement();
+      console.info("[spotify-player] activateElement() succeeded");
+      return true;
+    } catch (e) {
+      console.warn("[spotify-player] activateElement() threw:", e);
+      return false;
+    }
+  }, []);
+
+  return { status, deviceId, error, getCurrentState, activate };
 }
 
 /**

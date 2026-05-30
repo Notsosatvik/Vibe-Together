@@ -1,7 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertTriangle, CheckCircle2, Loader2, Volume2, Wifi, WifiOff } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Loader2,
+  Play,
+  Volume2,
+  Wifi,
+  WifiOff,
+} from "lucide-react";
 import {
   useSpotifyPlayer,
   playTrackOnDevice,
@@ -89,7 +97,16 @@ export function RoomPlayer({
     deviceId,
     error: playerError,
     getCurrentState,
+    activate,
   } = useSpotifyPlayer(true, { onTrackEnded: handleTrackEnded });
+
+  // Have we successfully primed the SDK's <audio> element with a user
+  // gesture? Browsers (especially mobile Safari) will silently swallow
+  // playback otherwise — Spotify accepts our PUT /me/player/play with a
+  // 2xx response and the progress bar ticks, but no sound comes out of
+  // the tab. We track this so the "Tap to start audio" button can hide
+  // itself once the gesture has happened.
+  const [audioArmed, setAudioArmed] = useState(false);
 
   // -------------------------------------------------------------------------
   // Socket lifecycle
@@ -311,21 +328,53 @@ export function RoomPlayer({
   // Manual retry button for the playback-error banner. Just nudges the
   // mirroring effect — clearing lastApplied makes the next render re-issue
   // the play command using the latest projected server position.
-  const onRetryPlayback = () => {
+  //
+  // Also calls activate() so this click counts as the user gesture that
+  // primes the SDK's <audio> element. Doubles up nicely: any time a user
+  // hits Retry we both refresh the play command AND unblock browser
+  // autoplay restrictions in one step.
+  const onRetryPlayback = async () => {
     setPlaybackError(null);
+    await activate();
+    setAudioArmed(true);
     if (!deviceId || playerStatus !== "ready" || !playback.trackUri) return;
     const target = computeTargetPosition(playback);
-    playTrackOnDevice(deviceId, playback.trackUri, target)
-      .then(() => {
-        lastAppliedRef.current = {
-          trackUri: playback.trackUri,
-          isPlaying: playback.isPlaying,
-        };
-      })
-      .catch((e: Error) => {
-        console.warn("[room-player] retry playTrackOnDevice failed:", e);
-        setPlaybackError(e.message ?? "Spotify still won't play this track.");
-      });
+    try {
+      await playTrackOnDevice(deviceId, playback.trackUri, target);
+      lastAppliedRef.current = {
+        trackUri: playback.trackUri,
+        isPlaying: playback.isPlaying,
+      };
+    } catch (e) {
+      console.warn("[room-player] retry playTrackOnDevice failed:", e);
+      setPlaybackError(
+        (e as Error).message ?? "Spotify still won't play this track.",
+      );
+    }
+  };
+
+  // Single click that does the "I am ready to hear audio" handshake:
+  // activate the SDK's audio element from inside this user gesture, then
+  // immediately re-issue the play command at the projected server position
+  // so audio starts NOW (not on the next server tick).
+  const onArmAudio = async () => {
+    await activate();
+    setAudioArmed(true);
+    if (!deviceId || playerStatus !== "ready" || !playback.trackUri) return;
+    const target = computeTargetPosition(playback);
+    try {
+      await playTrackOnDevice(deviceId, playback.trackUri, target);
+      lastAppliedRef.current = {
+        trackUri: playback.trackUri,
+        isPlaying: playback.isPlaying,
+      };
+    } catch (e) {
+      console.warn("[room-player] arm-audio play failed:", e);
+      setPlaybackError(
+        (e as Error).message ??
+          "Spotify accepted the play command but audio didn't start.",
+      );
+    }
   };
 
   // -------------------------------------------------------------------------
@@ -339,6 +388,9 @@ export function RoomPlayer({
     <div className="space-y-4">
       <SpotifyPlayerBanner status={playerStatus} error={playerError} />
       <LiveSyncBanner status={socketStatus} />
+      {playerStatus === "ready" && !audioArmed && (
+        <ActivateAudioBanner onArm={onArmAudio} />
+      )}
       {playbackError && (
         <PlaybackErrorBanner
           message={playbackError}
@@ -451,6 +503,41 @@ function SpotifyPlayerBanner({
         Retry
       </button>
     </div>
+  );
+}
+
+/**
+ * Banner that prompts the listener to tap once so the browser autoplay
+ * policy lets the SDK's audio element actually emit sound.
+ *
+ * THIS IS LITERALLY THE ONLY WAY to get audio out of the Web Playback
+ * SDK on a fresh page load in most modern browsers. Spotify happily PUTs
+ * /me/player/play with a 200 OK, the progress bar advances, but no audio
+ * comes out of the speakers until player.activateElement() has been
+ * called from inside a real user gesture. We tried doing it inside the
+ * `ready` listener (which fires as part of an async chain initiated by
+ * the SDK, NOT inside a user gesture stack) — Safari rejects.
+ *
+ * Hidden once the user clicks: subsequent track changes auto-play
+ * without further prompts because the AudioContext is already unlocked.
+ */
+function ActivateAudioBanner({ onArm }: { onArm: () => void }) {
+  return (
+    <button
+      onClick={onArm}
+      className="flex w-full items-center gap-3 rounded-xl border border-neon-green/40 bg-neon-green/[0.08] px-4 py-3 text-sm text-left hover:bg-neon-green/[0.12] transition-colors"
+    >
+      <div className="grid h-9 w-9 place-items-center rounded-full bg-neon-green text-ink-950 shrink-0">
+        <Play className="h-4 w-4 fill-current" />
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="font-medium">Tap here to start audio</div>
+        <div className="text-xs text-white/65 mt-0.5">
+          Your browser needs one tap before it&apos;ll let us play sound in
+          this tab.
+        </div>
+      </div>
+    </button>
   );
 }
 
