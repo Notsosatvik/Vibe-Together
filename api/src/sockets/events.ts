@@ -30,6 +30,16 @@ export type ClientToServerEvents = {
   "chat:typing": (payload: { roomId: string; isTyping: boolean }) => void;
   "reaction:fire": (payload: { roomId: string; emoji: string; atMs: number }) => void;
   "queue:add": (payload: { roomId: string; trackUri: string }) => void;
+  // Anyone may remove a track they themselves added; host/cohost may remove any.
+  // Server soft-deletes via QueueItem.playedAt = now() so the played-track
+  // bookkeeping remains consistent with skip-driven advancement.
+  "queue:remove": (payload: { roomId: string; queueItemId: string }) => void;
+  // Host/cohost only. orderedIds is the full desired ordering of unplayed
+  // queue items. The server rewrites every QueueItem.position to match,
+  // then broadcasts the new queue. Items not in the array (or that
+  // shouldn't be reorderable, e.g. the currently playing one) are
+  // ignored — the client should send only the upcoming list.
+  "queue:reorder": (payload: { roomId: string; orderedIds: string[] }) => void;
 
   // Clock sync — client sends client_ts, server replies with both -> client computes RTT/skew.
   "clock:ping": (payload: { clientSentAt: number }, ack: (resp: { serverTime: number; clientSentAt: number }) => void) => void;
@@ -37,7 +47,15 @@ export type ClientToServerEvents = {
 
 export type ServerToClientEvents = {
   "room:state": (state: RoomState) => void;
-  "room:presence": (payload: { userId: string; status: "joined" | "left" }) => void;
+  // Fires when someone joins or leaves a room. On "joined" we include the
+  // full Participant payload so clients can append it to their participants
+  // list without a round-trip back to /rooms/{id}. On "left" we just send
+  // userId so clients can filter their list.
+  "room:presence": (payload: {
+    userId: string;
+    status: "joined" | "left";
+    participant?: RoomState["participants"][number];
+  }) => void;
 
   "playback:state": (payload: PlaybackState) => void;
   "playback:tick": (payload: { positionMs: number; serverTime: number }) => void;

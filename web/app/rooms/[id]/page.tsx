@@ -20,6 +20,7 @@ import { apiFetch } from "@/lib/api";
 import { useUserStore } from "@/lib/store/user";
 import { useMe } from "@/lib/hooks/use-me";
 import { RoomPlayer } from "@/components/room/room-player";
+import { getSocket } from "@/lib/socket";
 
 type ApiUserMini = {
   id: string;
@@ -103,6 +104,61 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
         /* room may be private — that's fine, we'll just view */
       });
   }, [room, me, load]);
+
+  // Live participants list — subscribe to room:presence so the host (and
+  // everyone else) sees joiners appear / leavers disappear in real time.
+  // Without this, the list is set once from /rooms/{id} on mount and never
+  // updates, so the host can't see other users join their room.
+  //
+  // The server now ships full participant info on status:"joined" so we can
+  // append directly without a round-trip back to the REST endpoint. On
+  // status:"left" we just get a userId and filter.
+  useEffect(() => {
+    if (!room) return;
+    const sock = getSocket();
+    type Presence = {
+      userId: string;
+      status: "joined" | "left";
+      participant?: ApiUserMini & { role: "HOST" | "COHOST" | "LISTENER" };
+    };
+    const onPresence = ({ userId, status, participant }: Presence) => {
+      setRoom((prev) => {
+        if (!prev) return prev;
+        if (status === "joined" && participant) {
+          // Dedupe — server emits to the joiner too, and reconnects re-emit.
+          if (prev.participants.some((p) => p.user.id === participant.id)) {
+            return prev;
+          }
+          const newParticipant: ApiParticipant = {
+            // No RoomParticipant.id from the socket — use a stable synthetic
+            // key derived from the user id (good enough for React reconciliation
+            // until the next full reload).
+            id: `live-${participant.id}`,
+            role: participant.role,
+            user: {
+              id: participant.id,
+              name: participant.name,
+              handle: participant.handle,
+              avatarUrl: participant.avatarUrl,
+              avatarColor: participant.avatarColor,
+            },
+          };
+          return { ...prev, participants: [...prev.participants, newParticipant] };
+        }
+        if (status === "left") {
+          return {
+            ...prev,
+            participants: prev.participants.filter((p) => p.user.id !== userId),
+          };
+        }
+        return prev;
+      });
+    };
+    sock.on("room:presence", onPresence);
+    return () => {
+      sock.off("room:presence", onPresence);
+    };
+  }, [room?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const copyCode = async () => {
     if (!room) return;

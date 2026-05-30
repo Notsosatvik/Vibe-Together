@@ -149,10 +149,21 @@ function bindRoom(io: IO, socket: S) {
       socket.join(roomId);
 
       step = "prisma.roomParticipant.upsert";
-      await prisma.roomParticipant.upsert({
+      const joinedParticipant = await prisma.roomParticipant.upsert({
         where: { roomId_userId: { roomId, userId } },
         update: { leftAt: null },
         create: { roomId, userId, role: "LISTENER" },
+        include: {
+          user: {
+            select: {
+              id: true,
+              name: true,
+              handle: true,
+              avatarUrl: true,
+              avatarColor: true,
+            },
+          },
+        },
       });
 
       step = "loadPlayback";
@@ -189,7 +200,21 @@ function bindRoom(io: IO, socket: S) {
       };
 
       ack?.({ ok: true, state });
-      io.to(roomId).emit("room:presence", { userId, status: "joined" });
+      // Send the full participant payload so the host's UI can append the
+      // joiner to its participants list without a round-trip back to the
+      // /rooms/{id} REST endpoint.
+      io.to(roomId).emit("room:presence", {
+        userId,
+        status: "joined",
+        participant: {
+          id: joinedParticipant.user.id,
+          name: joinedParticipant.user.name,
+          handle: joinedParticipant.user.handle,
+          avatarUrl: joinedParticipant.user.avatarUrl,
+          avatarColor: joinedParticipant.user.avatarColor,
+          role: joinedParticipant.role,
+        },
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[socket] room:join crashed at step=${step}:`, err);
@@ -410,6 +435,134 @@ function bindRoom(io: IO, socket: S) {
       }
     });
   });
+
+  // -------------------------------------------------------------------------
+  // queue:remove — soft-delete an unplayed queue item.
+  //   * host/cohost can remove ANY track in the queue
+  //   * a listener can remove only tracks they themselves added
+  //
+  // Implementation: set playedAt = now() so it disappears from the active
+  // queue but the bookkeeping (which tracks have been "seen") stays
+  // consistent with how `playback:next` advances. We serialize per room
+  // for the same reason `queue:add` does: avoid racing with concurrent
+  // mutations of the same row set.
+  // -------------------------------------------------------------------------
+  socket.on(
+    "queue:remove",
+    safe<{ roomId: string; queueItemId: string }>(
+      "queue:remove",
+      async ({ roomId, queueItemId }) => {
+        const userId = socket.data.userId;
+        if (!userId || !queueItemId) return;
+        await runSerialPerRoom(roomId, async () => {
+          const item = await prisma.queueItem.findUnique({
+            where: { id: queueItemId },
+          });
+          if (!item || item.roomId !== roomId || item.playedAt) return;
+
+          const canRemoveAny = await isHostOrCohost(userId, roomId);
+          if (!canRemoveAny && item.addedById !== userId) {
+            console.info(
+              `[queue:remove] denied: user=${userId} is not host/cohost and didn't add item ${queueItemId}`,
+            );
+            return;
+          }
+
+          await prisma.queueItem.update({
+            where: { id: queueItemId },
+            data: { playedAt: new Date() },
+          });
+
+          const items = await prisma.queueItem.findMany({
+            where: { roomId, playedAt: null },
+            orderBy: { position: "asc" },
+          });
+          io.to(roomId).emit("queue:update", {
+            items: items.map((q) => ({
+              id: q.id,
+              trackUri: q.trackUri,
+              trackName: q.trackName,
+              artistName: q.artistName,
+              albumArtUrl: q.albumArtUrl,
+              durationMs: q.durationMs,
+              addedById: q.addedById,
+              position: q.position,
+            })),
+          });
+        });
+      },
+    ),
+  );
+
+  // -------------------------------------------------------------------------
+  // queue:reorder — host/cohost only. Rewrites every QueueItem.position in
+  // a single transaction so the saved ordering matches `orderedIds`.
+  //
+  // To avoid hitting the [roomId, position] index in an intermediate
+  // colliding state, we write positions to a high temporary range
+  // (10000+i) first, then back down to the final 1..N. This works even
+  // if the index were ever made UNIQUE in the future (it isn't today,
+  // but the two-pass pattern is cheap insurance).
+  // -------------------------------------------------------------------------
+  socket.on(
+    "queue:reorder",
+    safe<{ roomId: string; orderedIds: string[] }>(
+      "queue:reorder",
+      async ({ roomId, orderedIds }) => {
+        const userId = socket.data.userId;
+        if (!userId || !Array.isArray(orderedIds) || orderedIds.length === 0) return;
+        if (!(await isHostOrCohost(userId, roomId))) {
+          console.info(`[queue:reorder] denied: user=${userId} is not host/cohost`);
+          return;
+        }
+        await runSerialPerRoom(roomId, async () => {
+          // Whitelist: only allow reordering of items that actually belong to
+          // this room and are still unplayed. Ignore stranger IDs the client
+          // might have sent (stale UI state, malicious input, etc.).
+          const live = await prisma.queueItem.findMany({
+            where: { roomId, playedAt: null },
+            select: { id: true },
+          });
+          const liveIds = new Set(live.map((i) => i.id));
+          const filtered = orderedIds.filter((id) => liveIds.has(id));
+          if (filtered.length === 0) return;
+
+          await prisma.$transaction(async (tx) => {
+            // Two-pass to dodge intermediate-state collisions on the index.
+            for (let i = 0; i < filtered.length; i++) {
+              await tx.queueItem.update({
+                where: { id: filtered[i] },
+                data: { position: 10000 + i },
+              });
+            }
+            for (let i = 0; i < filtered.length; i++) {
+              await tx.queueItem.update({
+                where: { id: filtered[i] },
+                data: { position: i + 1 },
+              });
+            }
+          });
+
+          const items = await prisma.queueItem.findMany({
+            where: { roomId, playedAt: null },
+            orderBy: { position: "asc" },
+          });
+          io.to(roomId).emit("queue:update", {
+            items: items.map((q) => ({
+              id: q.id,
+              trackUri: q.trackUri,
+              trackName: q.trackName,
+              artistName: q.artistName,
+              albumArtUrl: q.albumArtUrl,
+              durationMs: q.durationMs,
+              addedById: q.addedById,
+              position: q.position,
+            })),
+          });
+        });
+      },
+    ),
+  );
 
   socket.on("chat:send", async ({ roomId, text }) => {
     const userId = socket.data.userId;
