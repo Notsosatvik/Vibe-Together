@@ -28,9 +28,28 @@ console.log("[boot] all imports loaded");
 const app = express();
 const server = http.createServer(app);
 
+// CORS — allow the configured WEB_ORIGIN, any *.vercel.app preview of this
+// project, and localhost for dev. We must echo back the *specific* origin
+// (not "*") because credentials are involved.
+const allowOrigin = (origin: string | undefined): boolean => {
+  if (!origin) return true; // same-origin / curl / server-side
+  if (origin === env.WEB_ORIGIN) return true;
+  if (/^http:\/\/localhost:\d+$/.test(origin)) return true;
+  // Any Vercel deployment under the user's account, e.g.
+  //   https://vibe-together.vercel.app
+  //   https://vibe-together-git-main-nososatvik-s-projects.vercel.app
+  //   https://vibe-together-1susc8y4m-nososatvik-s-projects.vercel.app
+  if (/^https:\/\/vibe-together(-[a-z0-9-]+)?\.vercel\.app$/.test(origin)) return true;
+  return false;
+};
+
 app.use(
   cors({
-    origin: env.WEB_ORIGIN,
+    origin: (origin, cb) => {
+      if (allowOrigin(origin)) return cb(null, true);
+      console.warn("[cors] rejected origin:", origin);
+      cb(new Error(`CORS: origin ${origin} not allowed`));
+    },
     credentials: true,
   })
 );
