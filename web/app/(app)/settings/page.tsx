@@ -107,6 +107,13 @@ export default function SettingsPage() {
                       hit permission errors.
                     </div>
                   </div>
+                  <button
+                    onClick={() => void startSpotifyConnect()}
+                    className="shrink-0 rounded-xl border border-white/15 bg-white/[0.06] hover:bg-white/[0.1] px-3 py-1.5 text-xs font-medium transition-colors"
+                    title="Re-run the Spotify OAuth flow to get a fresh access token. Use this after changing your User Management list on the Spotify Developer Dashboard."
+                  >
+                    Reconnect
+                  </button>
                 </div>
               ) : (
                 <div className="mt-6 flex flex-col gap-3">
