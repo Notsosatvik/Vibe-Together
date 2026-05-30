@@ -291,7 +291,23 @@ spotifyRouter.get("/diagnose", requireAuth, async (req, res, next) => {
     if (!r.ok) {
       const body = await r.text().catch(() => "");
       console.warn(`[spotify:diagnose] refresh failed ${r.status}: ${body}`);
-      return res.status(502).json({ error: `Spotify refresh failed: ${r.status}` });
+      // Spotify returns 400 invalid_grant when the refresh token has been
+      // revoked (user clicked "Remove Access" at spotify.com/account/apps,
+      // or signed in to a different Spotify account, etc.). Surface this
+      // clearly so the UI can prompt for a reconnect.
+      let parsed: { error?: string; error_description?: string } = {};
+      try {
+        parsed = JSON.parse(body);
+      } catch { /* not JSON */ }
+      const isRevoked =
+        r.status === 400 && parsed.error === "invalid_grant";
+      const message = isRevoked
+        ? "Your Spotify connection was revoked. Click Reconnect Spotify above to re-authorize."
+        : `Spotify refresh failed: ${r.status}${parsed.error_description ? ` (${parsed.error_description})` : ""}`;
+      return res.status(isRevoked ? 409 : 502).json({
+        error: message,
+        revoked: isRevoked,
+      });
     }
     const tokens = (await r.json()) as { scope?: string };
     const granted = (tokens.scope ?? "").split(" ").filter(Boolean);

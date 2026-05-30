@@ -103,7 +103,8 @@ export default function SettingsPage() {
                       )}
                     </div>
                     <div className="text-sm text-white/60">
-                      All required scopes granted.
+                      Linked to your account. Run a scope check below if you
+                      hit permission errors.
                     </div>
                   </div>
                 </div>
