@@ -193,7 +193,7 @@ function bindRoom(io: IO, socket: S) {
         name: string;
         duration_ms: number;
         artists: { name: string }[];
-        album: { images: { url: string }[] };
+        album: { name: string; images: { url: string }[] };
       };
 
       // Append to the end of the queue.
@@ -207,6 +207,7 @@ function bindRoom(io: IO, socket: S) {
           trackUri,
           trackName: t.name,
           artistName: t.artists.map((a) => a.name).join(", "),
+          albumName: t.album.name,
           albumArtUrl: t.album.images[0]?.url ?? null,
           durationMs: t.duration_ms,
           addedById: userId,
