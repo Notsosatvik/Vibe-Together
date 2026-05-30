@@ -258,6 +258,54 @@ export async function refreshSpotifyTokenForUser(userId: string): Promise<string
   return tokens.access_token;
 }
 
+// Diagnostic — force a Spotify token refresh and return the actual scope
+// set Spotify reports for the user's refresh token. This is the definitive
+// way to tell whether a 403 is a scope problem (current token genuinely
+// lacks the scope) vs a Spotify-side restriction (the scope is present
+// but Spotify still won't serve the resource — e.g. editorial playlists).
+//
+// Returns: { granted: string[], requested: string[], missing: string[] }
+// Hit from the browser at GET /spotify/diagnose while signed in.
+spotifyRouter.get("/diagnose", requireAuth, async (req, res, next) => {
+  try {
+    const user = await prisma.user.findUnique({ where: { id: req.user!.sub } });
+    if (!user?.spotifyRefreshToken) {
+      return res.status(409).json({ error: "Spotify not connected" });
+    }
+    // Force a fresh refresh so Spotify echoes back the current scope set.
+    // The cached path in refreshSpotifyTokenForUser would short-circuit if
+    // the access token is still valid, so we call Spotify directly here.
+    const r = await fetch("https://accounts.spotify.com/api/token", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Authorization:
+          "Basic " +
+          Buffer.from(`${env.SPOTIFY_CLIENT_ID}:${env.SPOTIFY_CLIENT_SECRET}`).toString("base64"),
+      },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: user.spotifyRefreshToken,
+      }),
+    });
+    if (!r.ok) {
+      const body = await r.text().catch(() => "");
+      console.warn(`[spotify:diagnose] refresh failed ${r.status}: ${body}`);
+      return res.status(502).json({ error: `Spotify refresh failed: ${r.status}` });
+    }
+    const tokens = (await r.json()) as { scope?: string };
+    const granted = (tokens.scope ?? "").split(" ").filter(Boolean);
+    const requested = SPOTIFY_SCOPES.split(" ").filter(Boolean);
+    const missing = requested.filter((s) => !granted.includes(s));
+    console.log(
+      `[spotify:diagnose] userId=${req.user!.sub} granted=[${granted.join(",")}] missing=[${missing.join(",")}]`,
+    );
+    res.json({ granted, requested, missing });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // Hand the user's current Spotify access token to the Web Playback SDK.
 // Refreshes the token first if it's about to expire. Premium-only — free
 // users can still call this; the SDK just won't initialize for them.
