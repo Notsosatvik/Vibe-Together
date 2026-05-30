@@ -1,8 +1,18 @@
 // Single source of truth for socket event names + payload shapes.
 // Both server and client import from here (the web app vendors a copy).
 
+// Standard ack envelope so the client can distinguish "server replied with
+// state" from "server replied with a real error" — both are vastly better
+// than the third case ("server never replied, client times out").
+export type AckResult<T> =
+  | { ok: true; state: T }
+  | { ok: false; error: string };
+
 export type ClientToServerEvents = {
-  "room:join": (payload: { roomId: string }, ack: (state: RoomState) => void) => void;
+  "room:join": (
+    payload: { roomId: string },
+    ack: (result: AckResult<RoomState>) => void,
+  ) => void;
   "room:leave": (payload: { roomId: string }) => void;
 
   // Host-only playback control. Server authoritatively re-broadcasts.

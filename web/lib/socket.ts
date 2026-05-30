@@ -66,12 +66,30 @@ export function getSocket(): Socket {
     autoConnect: true,
     withCredentials: true,
     auth: token ? { token } : undefined,
-    transports: ["websocket"],
+    // Include polling as a fallback. WebSocket-only handshakes fail silently
+    // through some corporate proxies, ad-blockers, and on slow Railway cold
+    // starts when the upgrade race loses. The server upgrades to WS as soon
+    // as it can — this is just insurance that the connection establishes.
+    transports: ["websocket", "polling"],
     reconnection: true,
     reconnectionDelay: 500,
     reconnectionDelayMax: 4000,
     reconnectionAttempts: Infinity,
+    timeout: 20000,
   });
+
+  if (typeof window !== "undefined") {
+    socket.on("connect", () => console.info("[socket] connected", socket?.id));
+    socket.on("connect_error", (err) =>
+      console.warn("[socket] connect_error:", err.message),
+    );
+    socket.on("disconnect", (reason) =>
+      console.warn("[socket] disconnected:", reason),
+    );
+    socket.on("reconnect_attempt", (n) =>
+      console.info("[socket] reconnect_attempt", n),
+    );
+  }
 
   let samples: number[] = [];
   const sync = () => {

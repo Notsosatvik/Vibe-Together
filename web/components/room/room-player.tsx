@@ -54,27 +54,45 @@ export function RoomPlayer({
     let joinTimer: number | null = null;
     let acked = false;
 
+    type JoinAck =
+      | { ok: true; state: RoomStateDTO }
+      | { ok: false; error: string };
+
     const onJoin = () => {
       console.info("[room-player] socket connected, sending room:join", { roomId });
-      sock.emit("room:join", { roomId }, (state: RoomStateDTO) => {
+      setSocketStatus({ kind: "connecting" });
+      sock.emit("room:join", { roomId }, (result: JoinAck | RoomStateDTO) => {
         acked = true;
         if (joinTimer) window.clearTimeout(joinTimer);
-        console.info("[room-player] room:join ack", state);
-        if (state && state.playback) setPlayback(state.playback);
-        if (state && state.queue) setQueue(state.queue);
+        console.info("[room-player] room:join ack", result);
+
+        // Back-compat: tolerate the older shape where ack was just RoomStateDTO.
+        const parsed: JoinAck =
+          result && typeof result === "object" && "ok" in result
+            ? (result as JoinAck)
+            : { ok: true, state: result as RoomStateDTO };
+
+        if (!parsed.ok) {
+          setSocketStatus({ kind: "error", message: parsed.error });
+          return;
+        }
+        const state = parsed.state;
+        if (state.playback) setPlayback(state.playback);
+        if (state.queue) setQueue(state.queue);
         setSocketStatus({ kind: "joined" });
       });
-      // If the server never acks the join (handler missing, error swallowed),
-      // we don't want to sit in "connecting" forever.
+      // Cold-start ceiling. Railway + Neon free-tier can take 10–15s to wake
+      // from idle, so the timeout must absorb that without giving up too soon.
       joinTimer = window.setTimeout(() => {
         if (!acked) {
-          console.warn("[room-player] room:join timed out after 8s");
+          console.warn("[room-player] room:join timed out after 20s");
           setSocketStatus({
             kind: "error",
-            message: "The room server didn't respond. We'll keep retrying in the background.",
+            message:
+              "The room server didn't respond. It may be waking up — try reloading in a few seconds.",
           });
         }
-      }, 8000);
+      }, 20000);
     };
 
     const onConnectError = (err: Error) => {
