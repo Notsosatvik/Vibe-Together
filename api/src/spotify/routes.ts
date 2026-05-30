@@ -95,13 +95,33 @@ spotifyRouter.get("/connect", (req, res, next) => {
     redirect_uri: env.SPOTIFY_REDIRECT_URI,
     scope: SPOTIFY_SCOPES,
     state: encoded,
-    show_dialog: "false",
+    // Force Spotify to show the consent dialog on every connect. Without this,
+    // Spotify silently auto-redirects with the user's *prior* scope grant when
+    // they've connected before — which means if we ever add a new scope (we
+    // recently added playlist-read-collaborative and user-library-read), an
+    // existing user clicking "Reconnect" gets a fresh access/refresh token
+    // that's *still missing the new scopes*. That manifests as a permanent
+    // 403 Forbidden loop on the affected endpoints (e.g. collaborative
+    // playlist tracks). Forcing the dialog adds one extra click but
+    // guarantees the new scopes are actually granted.
+    show_dialog: "true",
   });
   res.redirect(`https://accounts.spotify.com/authorize?${params.toString()}`);
 });
 
 spotifyRouter.get("/callback", async (req, res, next) => {
   try {
+    // If the user clicked "Cancel" on the Spotify consent dialog, Spotify
+    // redirects here with ?error=access_denied (no code). Bounce them back
+    // to the web app with a friendly hint instead of dumping a 400 JSON.
+    const oauthError = typeof req.query.error === "string" ? req.query.error : "";
+    if (oauthError) {
+      console.warn(`[spotify:callback] oauth denied: ${oauthError}`);
+      res.clearCookie("spotify_state", { ...crossSiteCookie });
+      res.clearCookie("spotify_return_to", { ...crossSiteCookie });
+      return res.redirect(`${env.WEB_ORIGIN}/settings?spotify=denied`);
+    }
+
     const code = String(req.query.code ?? "");
     const stateRaw = String(req.query.state ?? "");
     const [state, userId] = stateRaw.split(":");
@@ -128,7 +148,20 @@ spotifyRouter.get("/callback", async (req, res, next) => {
       access_token: string;
       refresh_token: string;
       expires_in: number;
+      scope?: string;
     };
+
+    // Log granted scopes so we can verify in Railway logs that the consent
+    // actually included the scopes we asked for. Spotify pins scopes to the
+    // refresh token at issue time, so if a scope is missing here it'll stay
+    // missing for the lifetime of this refresh token — only a fresh consent
+    // (show_dialog=true) can fix it.
+    const grantedScopes = (tokens.scope ?? "").split(" ").filter(Boolean);
+    const requestedScopes = SPOTIFY_SCOPES.split(" ").filter(Boolean);
+    const missingScopes = requestedScopes.filter((s) => !grantedScopes.includes(s));
+    console.log(
+      `[spotify:callback] userId=${userId} granted=[${grantedScopes.join(",")}] missing=[${missingScopes.join(",")}]`,
+    );
 
     const meRes = await fetch("https://api.spotify.com/v1/me", {
       headers: { Authorization: `Bearer ${tokens.access_token}` },
