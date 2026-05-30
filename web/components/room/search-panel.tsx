@@ -2,19 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Search, Plus, Loader2, AlertTriangle, Music } from "lucide-react";
-import { apiFetch } from "@/lib/api";
-
-type SpotifyTrack = {
-  uri: string;
-  name: string;
-  duration_ms: number;
-  artists: { name: string }[];
-  album: { images: { url: string }[]; name: string };
-};
-
-type SearchResponse = {
-  tracks?: { items: SpotifyTrack[] };
-};
+import {
+  searchSpotifyTracks,
+  type SpotifyTrack,
+} from "@/lib/hooks/use-spotify-player";
 
 export function SearchPanel({
   onAdd,
@@ -37,12 +28,11 @@ export function SearchPanel({
     debounceRef.current = window.setTimeout(async () => {
       setLoading(true);
       setError(null);
-      console.info("[search] querying spotify:", q);
+      console.info("[search] querying spotify (direct):", q);
       try {
-        const data = await apiFetch<SearchResponse>(
-          `/spotify/search?q=${encodeURIComponent(q)}`,
-        );
-        const items = data.tracks?.items ?? [];
+        // Direct browser → Spotify call. Bypasses our server proxy which was
+        // intermittently 400-ing from Railway. Same token pattern as playback.
+        const items = await searchSpotifyTracks(q);
         console.info(`[search] got ${items.length} results`);
         setResults(items.slice(0, 10));
       } catch (e) {

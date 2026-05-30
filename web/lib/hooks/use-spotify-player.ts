@@ -245,3 +245,51 @@ export async function seekPlayback(deviceId: string, positionMs: number) {
     { method: "PUT", headers: { Authorization: `Bearer ${access_token}` } }
   );
 }
+
+export type SpotifyTrack = {
+  uri: string;
+  name: string;
+  duration_ms: number;
+  artists: { name: string }[];
+  album: { images: { url: string }[]; name: string };
+};
+
+/**
+ * Search Spotify tracks DIRECTLY from the browser using the SDK token.
+ *
+ * Why client-side? Our server-side proxy at /spotify/search was getting
+ * intermittent 400s from Spotify (most likely Spotify rejecting Railway's
+ * outbound requests by user-agent or IP class). The Web Playback SDK token
+ * is the same one we'd use server-side and it's already proven valid in
+ * this tab (it's what's driving audio playback), so calling Spotify
+ * directly from the client both (a) removes the failing hop entirely and
+ * (b) gives us the verbatim Spotify error if anything still goes wrong.
+ */
+export async function searchSpotifyTracks(query: string): Promise<SpotifyTrack[]> {
+  if (!query.trim()) return [];
+  const { access_token } = await apiFetch<{ access_token: string }>("/spotify/token");
+  const url = `https://api.spotify.com/v1/search?type=track&limit=20&q=${encodeURIComponent(
+    query,
+  )}`;
+  const r = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${access_token}`,
+      Accept: "application/json",
+    },
+  });
+  if (!r.ok) {
+    const body = await r.text().catch(() => "");
+    // Spotify wraps errors as { error: { status, message } }. Pull the
+    // human-readable bit out so the UI doesn't show raw JSON.
+    let message = `Spotify returned ${r.status}`;
+    try {
+      const parsed = JSON.parse(body) as { error?: { message?: string } };
+      if (parsed?.error?.message) message = `Spotify: ${parsed.error.message}`;
+    } catch {
+      if (body) message = `Spotify ${r.status}: ${body.slice(0, 160)}`;
+    }
+    throw new Error(message);
+  }
+  const data = (await r.json()) as { tracks?: { items?: SpotifyTrack[] } };
+  return data.tracks?.items ?? [];
+}
