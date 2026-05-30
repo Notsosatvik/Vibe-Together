@@ -414,14 +414,24 @@ function SpotifyPlayerBanner({
   }
   if (status === "no-premium") {
     return (
-      <div className="flex items-center gap-3 rounded-xl border border-amber-400/30 bg-amber-400/[0.06] px-4 py-3 text-sm">
-        <AlertTriangle className="h-4 w-4 text-amber-300 shrink-0" />
-        <div>
+      <div className="flex items-start gap-3 rounded-xl border border-amber-400/30 bg-amber-400/[0.06] px-4 py-3 text-sm">
+        <AlertTriangle className="h-4 w-4 text-amber-300 shrink-0 mt-0.5" />
+        <div className="flex-1 min-w-0">
           <div className="font-medium">Spotify Premium required for playback.</div>
-          <div className="text-xs text-white/55">
+          <div className="text-xs text-white/65 mt-0.5">
             You can still see what&apos;s playing and follow the room — but audio needs Premium.
           </div>
+          <div className="text-[11px] text-white/45 mt-1.5">
+            Just upgraded? Click Reload — we cached your old plan from when you
+            first connected Spotify.
+          </div>
         </div>
+        <button
+          onClick={() => window.location.reload()}
+          className="shrink-0 rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs hover:bg-white/10 transition-colors"
+        >
+          Reload
+        </button>
       </div>
     );
   }

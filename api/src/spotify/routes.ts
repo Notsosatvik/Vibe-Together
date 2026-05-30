@@ -422,6 +422,15 @@ spotifyRouter.get("/diagnose", requireAuth, async (req, res, next) => {
 // Hand the user's current Spotify access token to the Web Playback SDK.
 // Refreshes the token first if it's about to expire. Premium-only — free
 // users can still call this; the SDK just won't initialize for them.
+//
+// Self-healing product re-check: spotifyProduct is captured ONCE during
+// OAuth connect and otherwise never updated. If a user upgrades from Free
+// to Premium *after* connecting (very common — they discover the room
+// requires Premium, click upgrade on spotify.com, then come back), our DB
+// still says "free" forever and the SDK never initializes. So whenever the
+// cached value isn't already "premium" we make one fresh /v1/me call and
+// write back. Once we see Premium we stop polling — Premium-to-Free
+// downgrades are rare enough that a manual Reconnect handles them.
 spotifyRouter.get("/token", requireAuth, async (req, res, next) => {
   try {
     const user = await prisma.user.findUnique({ where: { id: req.user!.sub } });
@@ -429,13 +438,47 @@ spotifyRouter.get("/token", requireAuth, async (req, res, next) => {
       return res.status(409).json({ error: "Spotify not connected" });
     }
     const token = await refreshSpotifyTokenForUser(req.user!.sub);
+
+    let product = user.spotifyProduct;
+    if (product !== "premium") {
+      try {
+        const meRes = await fetch("https://api.spotify.com/v1/me", {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (meRes.ok) {
+          const me = (await meRes.json()) as { product?: string | null };
+          const fresh = me.product ?? null;
+          if (fresh && fresh !== product) {
+            console.info(
+              `[spotify:token] product changed for ${req.user!.sub}: ${product} → ${fresh}`,
+            );
+            await prisma.user.update({
+              where: { id: req.user!.sub },
+              data: { spotifyProduct: fresh },
+            });
+            product = fresh;
+          }
+        } else {
+          // Don't fail the token request just because the product check
+          // hit a transient — the SDK will catch up next tick.
+          console.warn(
+            `[spotify:token] /v1/me product check failed ${meRes.status}; keeping cached "${product}"`,
+          );
+        }
+      } catch (e) {
+        console.warn(
+          `[spotify:token] /v1/me product check threw: ${(e as Error).message}`,
+        );
+      }
+    }
+
     const expiresInMs =
       user.spotifyTokenExpiry && user.spotifyTokenExpiry > new Date()
         ? user.spotifyTokenExpiry.getTime() - Date.now()
         : 3500_000;
     res.json({
       access_token: token,
-      product: user.spotifyProduct,
+      product,
       expires_in_ms: expiresInMs,
     });
   } catch (err) {
