@@ -66,18 +66,58 @@ authRouter.get("/google/callback", async (req, res, next) => {
         grant_type: "authorization_code",
       }),
     });
-    if (!tokenRes.ok) throw new Error("Google token exchange failed");
+    // Read errors as text-first so a non-JSON body (HTML error page, plain
+    // text rejection) doesn't crash JSON.parse and dump an opaque
+    // "Unexpected token 'T', \"The user i\"... is not valid JSON" page at
+    // the API host. Redirect back to the web app with a friendly reason.
+    if (!tokenRes.ok) {
+      const body = await tokenRes.text().catch(() => "");
+      console.warn(
+        `[auth:google] token exchange failed ${tokenRes.status}: ${body.slice(0, 300)}`,
+      );
+      res.clearCookie("oauth_state", { ...crossSiteCookie });
+      return res.redirect(
+        `${env.WEB_ORIGIN}/login?error=${encodeURIComponent(
+          "Google sign-in failed. Try again, and check that your Google account is allowed on the app's OAuth consent screen.",
+        )}`,
+      );
+    }
     const { access_token } = (await tokenRes.json()) as { access_token: string };
 
     const userInfoRes = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
       headers: { Authorization: `Bearer ${access_token}` },
     });
-    const profile = (await userInfoRes.json()) as {
+    const userInfoBody = await userInfoRes.text().catch(() => "");
+    if (!userInfoRes.ok) {
+      console.warn(
+        `[auth:google] /userinfo failed ${userInfoRes.status}: ${userInfoBody.slice(0, 400)}`,
+      );
+      res.clearCookie("oauth_state", { ...crossSiteCookie });
+      return res.redirect(
+        `${env.WEB_ORIGIN}/login?error=${encodeURIComponent(
+          "Google rejected the profile lookup. Try signing in again — if it keeps failing, your Google account may need to be added as a test user.",
+        )}`,
+      );
+    }
+    let profile: {
       sub: string;
       email: string;
       name: string;
       picture?: string;
     };
+    try {
+      profile = JSON.parse(userInfoBody);
+    } catch {
+      console.warn(
+        `[auth:google] /userinfo returned non-JSON body: ${userInfoBody.slice(0, 400)}`,
+      );
+      res.clearCookie("oauth_state", { ...crossSiteCookie });
+      return res.redirect(
+        `${env.WEB_ORIGIN}/login?error=${encodeURIComponent(
+          "Google returned an unexpected response. Try again in a minute.",
+        )}`,
+      );
+    }
 
     // Upsert user
     const baseHandle = profile.email.split("@")[0]!.replace(/[^a-z0-9_]/gi, "").toLowerCase();

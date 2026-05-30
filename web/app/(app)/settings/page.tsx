@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Check, Music, Shield, LogOut, AlertTriangle, Loader2 } from "lucide-react";
 import { TopBar } from "@/components/app/topbar";
@@ -25,6 +25,35 @@ export default function SettingsPage() {
   const user = useUserStore((s) => s.user);
   const clearUser = useUserStore((s) => s.clear);
   const [active, setActive] = useState<(typeof sections)[number]["id"]>("account");
+
+  // Surface Spotify-callback errors via ?spotify=error&reason=... The API
+  // redirects here (instead of dumping raw JSON on the API host) when the
+  // OAuth callback fails — e.g. user not on the User Management allowlist,
+  // /v1/me returned a non-JSON body, token exchange rejected, etc.
+  const [spotifyError, setSpotifyError] = useState<string | null>(null);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const status = params.get("spotify");
+    if (status === "error") {
+      const reason =
+        params.get("reason") ??
+        "Couldn't connect Spotify. Try Reconnect again.";
+      setSpotifyError(reason);
+      setActive("spotify");
+    } else if (status === "denied") {
+      setSpotifyError(
+        "Spotify connection was canceled. Click Connect Spotify to try again.",
+      );
+      setActive("spotify");
+    }
+    if (status) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("spotify");
+      url.searchParams.delete("reason");
+      window.history.replaceState(null, "", url.pathname + url.search);
+    }
+  }, []);
 
   if (!user) return null;
 
@@ -88,6 +117,22 @@ export default function SettingsPage() {
               <p className="text-sm text-white/55 mt-1">
                 Manage your Spotify connection.
               </p>
+
+              {spotifyError && (
+                <div className="mt-5 flex items-start gap-2 rounded-xl border border-rose-400/30 bg-rose-400/[0.08] px-3.5 py-3 text-sm text-rose-100">
+                  <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0 text-rose-300" />
+                  <div className="flex-1 leading-snug break-words">
+                    {spotifyError}
+                  </div>
+                  <button
+                    onClick={() => setSpotifyError(null)}
+                    className="shrink-0 text-rose-200/60 hover:text-rose-100 text-xs"
+                    aria-label="Dismiss"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
               {user.spotifyId ? (
                 <div className="mt-6 flex items-center gap-3 rounded-2xl border border-neon-green/30 bg-neon-green/[0.06] px-5 py-4">
                   <div className="grid h-10 w-10 place-items-center rounded-full bg-neon-green text-ink-950">

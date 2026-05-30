@@ -143,7 +143,19 @@ spotifyRouter.get("/callback", async (req, res, next) => {
         redirect_uri: env.SPOTIFY_REDIRECT_URI!,
       }),
     });
-    if (!tokenRes.ok) throw new Error("Spotify token exchange failed");
+    if (!tokenRes.ok) {
+      const body = await tokenRes.text().catch(() => "");
+      console.warn(
+        `[spotify:callback] token exchange failed ${tokenRes.status}: ${body.slice(0, 300)}`,
+      );
+      res.clearCookie("spotify_state", { ...crossSiteCookie });
+      res.clearCookie("spotify_return_to", { ...crossSiteCookie });
+      return res.redirect(
+        `${env.WEB_ORIGIN}/settings?spotify=error&reason=${encodeURIComponent(
+          "Spotify rejected the sign-in. Please try Reconnect again.",
+        )}`,
+      );
+    }
     const tokens = (await tokenRes.json()) as {
       access_token: string;
       refresh_token: string;
@@ -163,10 +175,49 @@ spotifyRouter.get("/callback", async (req, res, next) => {
       `[spotify:callback] userId=${userId} granted=[${grantedScopes.join(",")}] missing=[${missingScopes.join(",")}]`,
     );
 
+    // Fetch the Spotify profile — but defensively, because Spotify Dev Mode
+    // returns a *plaintext* 403 body (not JSON) for users who aren't on the
+    // User Management allowlist. Calling `.json()` directly on that crashes
+    // with "Unexpected token 'T', \"The user i\"... is not valid JSON" which
+    // would otherwise propagate out as a raw JSON dump on the API host. We
+    // read the body as text first, try to parse it, and on any failure
+    // redirect back to /settings with a clear error message so the user sees
+    // an actionable in-app banner instead of a cryptic JSON page.
     const meRes = await fetch("https://api.spotify.com/v1/me", {
       headers: { Authorization: `Bearer ${tokens.access_token}` },
     });
-    const profile = (await meRes.json()) as { id: string; product: string };
+    const meBody = await meRes.text().catch(() => "");
+    if (!meRes.ok) {
+      console.warn(
+        `[spotify:callback] /v1/me failed ${meRes.status} for userId=${userId}: ${meBody.slice(0, 400)}`,
+      );
+      res.clearCookie("spotify_state", { ...crossSiteCookie });
+      res.clearCookie("spotify_return_to", { ...crossSiteCookie });
+      const looksLikeDevModeBlock =
+        meRes.status === 403 &&
+        /not registered|developer dashboard|user management/i.test(meBody);
+      const friendly = looksLikeDevModeBlock
+        ? "Your Spotify account isn't on the beta allowlist yet. Ask the host to add your Spotify email at developer.spotify.com/dashboard → Users and Access, then try again."
+        : `Spotify rejected the profile lookup (${meRes.status}). Try Reconnect again, or check that your Spotify account is on the User Management list at developer.spotify.com/dashboard.`;
+      return res.redirect(
+        `${env.WEB_ORIGIN}/settings?spotify=error&reason=${encodeURIComponent(friendly)}`,
+      );
+    }
+    let profile: { id: string; product: string };
+    try {
+      profile = JSON.parse(meBody) as { id: string; product: string };
+    } catch {
+      console.warn(
+        `[spotify:callback] /v1/me returned non-JSON body for userId=${userId}: ${meBody.slice(0, 400)}`,
+      );
+      res.clearCookie("spotify_state", { ...crossSiteCookie });
+      res.clearCookie("spotify_return_to", { ...crossSiteCookie });
+      return res.redirect(
+        `${env.WEB_ORIGIN}/settings?spotify=error&reason=${encodeURIComponent(
+          "Spotify returned an unexpected response. Try Reconnect again in a minute.",
+        )}`,
+      );
+    }
 
     await prisma.user.update({
       where: { id: userId },

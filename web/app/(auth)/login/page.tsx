@@ -1,7 +1,9 @@
 "use client";
 
 import Link from "next/link";
+import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
+import { AlertTriangle } from "lucide-react";
 import { GlassCard } from "@/components/ui/glass-card";
 import { Visualizer } from "@/components/shared/visualizer";
 import { AlbumArt } from "@/components/shared/album-art";
@@ -11,6 +13,24 @@ import { startGoogleLogin } from "@/lib/api";
 export default function LoginPage() {
   const startGoogle = () => startGoogleLogin();
 
+  // The Google OAuth callback redirects back to /login?error=... when
+  // sign-in fails (e.g. token exchange returned non-JSON, userinfo 403'd,
+  // account not on the Testing-mode allowlist). Surface the reason in-app
+  // instead of leaving the user staring at a raw JSON page on the API host.
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const err = params.get("error");
+    if (err) {
+      setError(err);
+      // Strip the query so a refresh doesn't keep showing the banner.
+      const url = new URL(window.location.href);
+      url.searchParams.delete("error");
+      window.history.replaceState(null, "", url.pathname + url.search);
+    }
+  }, []);
+
   return (
     <div className="grid w-full max-w-5xl gap-10 lg:grid-cols-2 items-center">
       <motion.div
@@ -19,6 +39,20 @@ export default function LoginPage() {
         transition={{ duration: 0.5 }}
         className="order-2 lg:order-1"
       >
+        {error && (
+          <div className="mb-5 flex items-start gap-2 rounded-xl border border-rose-400/30 bg-rose-400/[0.08] px-3.5 py-3 text-sm text-rose-100">
+            <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0 text-rose-300" />
+            <div className="flex-1 leading-snug">{error}</div>
+            <button
+              onClick={() => setError(null)}
+              className="shrink-0 text-rose-200/60 hover:text-rose-100 text-xs"
+              aria-label="Dismiss"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
         <div className="inline-flex items-center gap-2 rounded-full glass px-3 py-1 text-xs text-white/70">
           <span className="h-1.5 w-1.5 rounded-full bg-neon-green" />
           Welcome back
