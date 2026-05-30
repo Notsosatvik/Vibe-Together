@@ -258,10 +258,24 @@ spotifyRouter.get("/callback", async (req, res, next) => {
 });
 
 // Refresh a user's Spotify access token if expired. Returns a fresh token (used by sockets).
-export async function refreshSpotifyTokenForUser(userId: string): Promise<string> {
+//
+// Pass `force: true` to bypass the "still valid" short-circuit. Use this when
+// Spotify's per-token entitlements may have changed even though the token
+// hasn't expired — most importantly, when a user upgrades Free → Premium.
+// /v1/me will report the new plan immediately, but /me/player/play continues
+// returning 403 Premium-required because the *token claims* still say Free
+// until we mint a new one from the refresh token.
+export async function refreshSpotifyTokenForUser(
+  userId: string,
+  opts?: { force?: boolean },
+): Promise<string> {
   const user = await prisma.user.findUnique({ where: { id: userId } });
   if (!user?.spotifyRefreshToken) throw new Error("No Spotify refresh token");
-  if (user.spotifyTokenExpiry && user.spotifyTokenExpiry > new Date(Date.now() + 60_000)) {
+  if (
+    !opts?.force &&
+    user.spotifyTokenExpiry &&
+    user.spotifyTokenExpiry > new Date(Date.now() + 60_000)
+  ) {
     return user.spotifyAccessToken!;
   }
   const res = await fetch("https://accounts.spotify.com/api/token", {
@@ -437,7 +451,7 @@ spotifyRouter.get("/token", requireAuth, async (req, res, next) => {
     if (!user?.spotifyRefreshToken) {
       return res.status(409).json({ error: "Spotify not connected" });
     }
-    const token = await refreshSpotifyTokenForUser(req.user!.sub);
+    let token = await refreshSpotifyTokenForUser(req.user!.sub);
 
     let product = user.spotifyProduct;
     if (product !== "premium") {
@@ -457,6 +471,30 @@ spotifyRouter.get("/token", requireAuth, async (req, res, next) => {
               data: { spotifyProduct: fresh },
             });
             product = fresh;
+
+            // CRITICAL: when product flips to premium we must also mint a
+            // brand-new access token from the refresh token. Spotify pins
+            // the user's plan into the access token's claims at issue
+            // time — so the token we just used for /v1/me (which reads
+            // the live profile) still says "free" at the playback layer,
+            // and /me/player/play would keep returning 403 Premium
+            // required until the token's natural ~1h expiry. Forcing a
+            // refresh now gets the SDK a token with the updated
+            // entitlements on the very next call.
+            if (fresh === "premium") {
+              try {
+                token = await refreshSpotifyTokenForUser(req.user!.sub, {
+                  force: true,
+                });
+                console.info(
+                  `[spotify:token] minted fresh token after Free → Premium upgrade for ${req.user!.sub}`,
+                );
+              } catch (e) {
+                console.warn(
+                  `[spotify:token] force-refresh after upgrade failed: ${(e as Error).message}`,
+                );
+              }
+            }
           }
         } else {
           // Don't fail the token request just because the product check
@@ -472,9 +510,14 @@ spotifyRouter.get("/token", requireAuth, async (req, res, next) => {
       }
     }
 
+    // Re-read so expires_in_ms reflects any force-refresh above.
+    const refreshed = await prisma.user.findUnique({
+      where: { id: req.user!.sub },
+      select: { spotifyTokenExpiry: true },
+    });
     const expiresInMs =
-      user.spotifyTokenExpiry && user.spotifyTokenExpiry > new Date()
-        ? user.spotifyTokenExpiry.getTime() - Date.now()
+      refreshed?.spotifyTokenExpiry && refreshed.spotifyTokenExpiry > new Date()
+        ? refreshed.spotifyTokenExpiry.getTime() - Date.now()
         : 3500_000;
     res.json({
       access_token: token,
