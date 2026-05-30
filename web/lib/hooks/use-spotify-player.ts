@@ -313,51 +313,86 @@ export function useSpotifyPlayer(
  * Tell Spotify to play a specific track URI on the user's Web Playback device,
  * starting at the given position. Uses the user's access token directly via
  * /me/player/play — the SDK doesn't expose a clean play(uri) call.
+ *
+ * Failure modes worth knowing about (we surface these as SpotifyApiError so
+ * the UI can show a banner instead of silently muting the listener):
+ *   - 401 → token expired; the SDK will trigger getOAuthToken on the next
+ *     attempt, so a single retry from the caller usually clears this.
+ *   - 403 PREMIUM_REQUIRED → the account isn't actually Premium even though
+ *     /spotify/token said it was (rare; usually a family-plan child account).
+ *   - 403 Restricted device → SDK device exists but Spotify won't route
+ *     audio to it (region/account restriction, ad-blocker, weird browser).
+ *   - 404 NO_ACTIVE_DEVICE → SDK reported "ready" but Spotify hasn't
+ *     finished registering the device yet. Auto-retries once after ~500ms
+ *     because this is by far the most common transient on listener load.
+ *   - 502 Player command failed → Spotify backend hiccup. One retry.
+ *
+ * Returns void on success. Throws SpotifyApiError on permanent failure.
  */
 export async function playTrackOnDevice(
   deviceId: string,
   trackUri: string,
-  positionMs: number
+  positionMs: number,
 ) {
-  const { access_token } = await apiFetch<{ access_token: string }>(
-    "/spotify/token"
-  );
-  await fetch(
-    `https://api.spotify.com/v1/me/player/play?device_id=${encodeURIComponent(deviceId)}`,
-    {
+  const url = `https://api.spotify.com/v1/me/player/play?device_id=${encodeURIComponent(deviceId)}`;
+  const body = JSON.stringify({
+    uris: [trackUri],
+    position_ms: Math.max(0, Math.floor(positionMs)),
+  });
+
+  const attempt = async () => {
+    const { access_token } = await apiFetch<{ access_token: string }>(
+      "/spotify/token",
+    );
+    return fetch(url, {
       method: "PUT",
       headers: {
         Authorization: `Bearer ${access_token}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        uris: [trackUri],
-        position_ms: Math.max(0, Math.floor(positionMs)),
-      }),
-    }
-  );
+      body,
+    });
+  };
+
+  let r = await attempt();
+  // 404 (NO_ACTIVE_DEVICE) and 502 are commonly transient when the SDK has
+  // just announced "ready" — Spotify's device registry lags slightly behind
+  // the SDK's local "ready" event. One retry with a short delay clears the
+  // vast majority of cases.
+  if (r.status === 404 || r.status === 502) {
+    console.warn(
+      `[spotify-cmd] play got ${r.status}, retrying once after 600ms`,
+    );
+    await new Promise((res) => setTimeout(res, 600));
+    r = await attempt();
+  }
+  if (!r.ok) throw await formatSpotifyError(r);
 }
 
 export async function pausePlayback(deviceId: string) {
   const { access_token } = await apiFetch<{ access_token: string }>(
-    "/spotify/token"
+    "/spotify/token",
   );
-  await fetch(
+  const r = await fetch(
     `https://api.spotify.com/v1/me/player/pause?device_id=${encodeURIComponent(deviceId)}`,
-    { method: "PUT", headers: { Authorization: `Bearer ${access_token}` } }
+    { method: "PUT", headers: { Authorization: `Bearer ${access_token}` } },
   );
+  // 403 here is benign — "already paused" returns 403 with Restriction
+  // violated. Don't throw on that; it'd spam the UI for nothing.
+  if (!r.ok && r.status !== 403) throw await formatSpotifyError(r);
 }
 
 export async function seekPlayback(deviceId: string, positionMs: number) {
   const { access_token } = await apiFetch<{ access_token: string }>(
-    "/spotify/token"
+    "/spotify/token",
   );
-  await fetch(
+  const r = await fetch(
     `https://api.spotify.com/v1/me/player/seek?position_ms=${Math.floor(
-      positionMs
+      positionMs,
     )}&device_id=${encodeURIComponent(deviceId)}`,
-    { method: "PUT", headers: { Authorization: `Bearer ${access_token}` } }
+    { method: "PUT", headers: { Authorization: `Bearer ${access_token}` } },
   );
+  if (!r.ok) throw await formatSpotifyError(r);
 }
 
 export type SpotifyTrack = {

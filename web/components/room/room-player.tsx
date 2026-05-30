@@ -40,6 +40,11 @@ export function RoomPlayer({
   const [playback, setPlayback] = useState<PlaybackState>(initialPlayback);
   const [queue, setQueue] = useState<QueueItemDTO[]>(initialQueue);
   const [socketStatus, setSocketStatus] = useState<SocketStatus>({ kind: "connecting" });
+  // Surfaces the LAST error from Spotify's /me/player/* commands (play, pause,
+  // seek). Before we added .ok checking inside those helpers the listener
+  // would just sit there in silence with no indication why — now they see
+  // exactly which Spotify call failed and can hit Retry.
+  const [playbackError, setPlaybackError] = useState<string | null>(null);
 
   // Track the last (trackUri,isPlaying) pair we asked our local Spotify to play
   // so we don't keep re-issuing the same play command on every state tick.
@@ -194,13 +199,27 @@ export function RoomPlayer({
       // New track OR transitioning to playing — start playback from the
       // currently projected server position.
       const target = computeTargetPosition(playback);
-      void playTrackOnDevice(deviceId, playback.trackUri, target);
+      playTrackOnDevice(deviceId, playback.trackUri, target)
+        .then(() => setPlaybackError(null))
+        .catch((e: Error) => {
+          console.warn("[room-player] playTrackOnDevice failed:", e);
+          setPlaybackError(
+            e.message ??
+              "Spotify wouldn't play this track on your device. Try clicking Retry.",
+          );
+          // Reset lastApplied so the next playback:state tick re-triggers
+          // the play call — otherwise we'd never recover from a transient
+          // error without a manual page reload.
+          lastAppliedRef.current = { trackUri: null, isPlaying: false };
+        });
       lastAppliedRef.current = {
         trackUri: playback.trackUri,
         isPlaying: true,
       };
     } else if (!playback.isPlaying && playStateChanged) {
-      void pausePlayback(deviceId);
+      pausePlayback(deviceId).catch((e) =>
+        console.warn("[room-player] pausePlayback failed:", e),
+      );
       lastAppliedRef.current = {
         trackUri: playback.trackUri,
         isPlaying: false,
@@ -289,6 +308,26 @@ export function RoomPlayer({
     getSocket().emit("playback:next", { roomId });
   };
 
+  // Manual retry button for the playback-error banner. Just nudges the
+  // mirroring effect — clearing lastApplied makes the next render re-issue
+  // the play command using the latest projected server position.
+  const onRetryPlayback = () => {
+    setPlaybackError(null);
+    if (!deviceId || playerStatus !== "ready" || !playback.trackUri) return;
+    const target = computeTargetPosition(playback);
+    playTrackOnDevice(deviceId, playback.trackUri, target)
+      .then(() => {
+        lastAppliedRef.current = {
+          trackUri: playback.trackUri,
+          isPlaying: playback.isPlaying,
+        };
+      })
+      .catch((e: Error) => {
+        console.warn("[room-player] retry playTrackOnDevice failed:", e);
+        setPlaybackError(e.message ?? "Spotify still won't play this track.");
+      });
+  };
+
   // -------------------------------------------------------------------------
   // Render
   // -------------------------------------------------------------------------
@@ -300,6 +339,13 @@ export function RoomPlayer({
     <div className="space-y-4">
       <SpotifyPlayerBanner status={playerStatus} error={playerError} />
       <LiveSyncBanner status={socketStatus} />
+      {playbackError && (
+        <PlaybackErrorBanner
+          message={playbackError}
+          onRetry={onRetryPlayback}
+          onDismiss={() => setPlaybackError(null)}
+        />
+      )}
 
       {isHost && !hasTrack && <SearchPanel onAdd={onAddToQueue} />}
 
@@ -394,6 +440,61 @@ function SpotifyPlayerBanner({
       >
         Retry
       </button>
+    </div>
+  );
+}
+
+/**
+ * Status banner #3 — a Spotify /me/player/* command failed (play, pause, or
+ * seek). This is the banner that finally tells the listener "your device
+ * couldn't be activated" instead of just sitting silently while the host
+ * thinks the song is playing.
+ *
+ * Most common message we'll see here:
+ *   - "Spotify 404: NO_ACTIVE_DEVICE" — even after our one-shot retry, the
+ *     device hasn't registered. Usually fixed by the listener clicking
+ *     anywhere in the tab (browser autoplay policy) or by hitting Retry.
+ *   - "Spotify 403: PREMIUM_REQUIRED" — listener's account isn't Premium
+ *     even though /spotify/token claimed it was (e.g. family-plan child).
+ *   - "Spotify 403: Restricted device" — region/account restriction.
+ */
+function PlaybackErrorBanner({
+  message,
+  onRetry,
+  onDismiss,
+}: {
+  message: string;
+  onRetry: () => void;
+  onDismiss: () => void;
+}) {
+  return (
+    <div className="flex items-start gap-3 rounded-xl border border-rose-400/30 bg-rose-400/[0.08] px-4 py-3 text-sm">
+      <AlertTriangle className="h-4 w-4 text-rose-300 shrink-0 mt-0.5" />
+      <div className="min-w-0 flex-1">
+        <div className="font-medium">Spotify wouldn&apos;t start playback.</div>
+        <div className="text-xs text-white/65 break-words mt-0.5">
+          {message}
+        </div>
+        <div className="text-[11px] text-white/45 mt-1.5">
+          Tip: click anywhere on this tab first — some browsers block audio
+          until you interact with the page.
+        </div>
+      </div>
+      <div className="flex items-center gap-1.5 shrink-0">
+        <button
+          onClick={onRetry}
+          className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs hover:bg-white/10 transition-colors"
+        >
+          Retry
+        </button>
+        <button
+          onClick={onDismiss}
+          className="text-white/45 hover:text-white/80 text-xs px-1"
+          aria-label="Dismiss"
+        >
+          ✕
+        </button>
+      </div>
     </div>
   );
 }
