@@ -277,19 +277,81 @@ export async function searchSpotifyTracks(query: string): Promise<SpotifyTrack[]
       Accept: "application/json",
     },
   });
-  if (!r.ok) {
-    const body = await r.text().catch(() => "");
-    // Spotify wraps errors as { error: { status, message } }. Pull the
-    // human-readable bit out so the UI doesn't show raw JSON.
-    let message = `Spotify returned ${r.status}`;
-    try {
-      const parsed = JSON.parse(body) as { error?: { message?: string } };
-      if (parsed?.error?.message) message = `Spotify: ${parsed.error.message}`;
-    } catch {
-      if (body) message = `Spotify ${r.status}: ${body.slice(0, 160)}`;
-    }
-    throw new Error(message);
-  }
+  if (!r.ok) throw new Error(await formatSpotifyError(r));
   const data = (await r.json()) as { tracks?: { items?: SpotifyTrack[] } };
   return data.tracks?.items ?? [];
+}
+
+export type SpotifyPlaylist = {
+  id: string;
+  name: string;
+  images: { url: string }[];
+  tracks: { total: number };
+  owner: { display_name: string | null };
+};
+
+/**
+ * List the signed-in user's Spotify playlists (the ones they own *or* follow).
+ * Direct browser call — same rationale as searchSpotifyTracks above.
+ *
+ * Requires the `playlist-read-private` scope, which we already request
+ * during the Spotify OAuth flow.
+ */
+export async function getMyPlaylists(): Promise<SpotifyPlaylist[]> {
+  const { access_token } = await apiFetch<{ access_token: string }>("/spotify/token");
+  // 50 is Spotify's max page size — enough for an MVP. Paginate later if
+  // we hit users with hundreds of playlists.
+  const r = await fetch("https://api.spotify.com/v1/me/playlists?limit=50", {
+    headers: {
+      Authorization: `Bearer ${access_token}`,
+      Accept: "application/json",
+    },
+  });
+  if (!r.ok) throw new Error(await formatSpotifyError(r));
+  const data = (await r.json()) as { items?: SpotifyPlaylist[] };
+  return data.items ?? [];
+}
+
+/**
+ * Fetch the tracks inside a playlist. We use `fields` to keep the response
+ * shape tiny and predictable — Spotify's full playlist-track object is huge
+ * (audio features, available markets, link relations…) and we only need the
+ * five fields that drive the queue row UI.
+ *
+ * Non-track items (podcasts, region-blocked, deleted) come back as `null`
+ * inside the `items` array — we filter those out so callers always get a
+ * clean SpotifyTrack[].
+ */
+export async function getPlaylistTracks(playlistId: string): Promise<SpotifyTrack[]> {
+  const { access_token } = await apiFetch<{ access_token: string }>("/spotify/token");
+  const url = `https://api.spotify.com/v1/playlists/${encodeURIComponent(
+    playlistId,
+  )}/tracks?limit=100&fields=items(track(uri,name,duration_ms,artists(name),album(name,images)))`;
+  const r = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${access_token}`,
+      Accept: "application/json",
+    },
+  });
+  if (!r.ok) throw new Error(await formatSpotifyError(r));
+  const data = (await r.json()) as {
+    items?: { track: SpotifyTrack | null }[];
+  };
+  return (data.items ?? [])
+    .map((i) => i.track)
+    .filter((t): t is SpotifyTrack => !!t && !!t.uri);
+}
+
+// Spotify wraps errors as { error: { status, message } }. Pull the
+// human-readable bit out so the UI doesn't show raw JSON.
+async function formatSpotifyError(r: Response): Promise<string> {
+  const body = await r.text().catch(() => "");
+  try {
+    const parsed = JSON.parse(body) as { error?: { message?: string } };
+    if (parsed?.error?.message) return `Spotify: ${parsed.error.message}`;
+  } catch {
+    /* fall through */
+  }
+  if (body) return `Spotify ${r.status}: ${body.slice(0, 160)}`;
+  return `Spotify returned ${r.status}`;
 }
