@@ -277,7 +277,7 @@ export async function searchSpotifyTracks(query: string): Promise<SpotifyTrack[]
       Accept: "application/json",
     },
   });
-  if (!r.ok) throw new Error(await formatSpotifyError(r));
+  if (!r.ok) throw await formatSpotifyError(r);
   const data = (await r.json()) as { tracks?: { items?: SpotifyTrack[] } };
   return data.tracks?.items ?? [];
 }
@@ -307,7 +307,7 @@ export async function getMyPlaylists(): Promise<SpotifyPlaylist[]> {
       Accept: "application/json",
     },
   });
-  if (!r.ok) throw new Error(await formatSpotifyError(r));
+  if (!r.ok) throw await formatSpotifyError(r);
   const data = (await r.json()) as { items?: SpotifyPlaylist[] };
   return data.items ?? [];
 }
@@ -333,7 +333,7 @@ export async function getPlaylistTracks(playlistId: string): Promise<SpotifyTrac
       Accept: "application/json",
     },
   });
-  if (!r.ok) throw new Error(await formatSpotifyError(r));
+  if (!r.ok) throw await formatSpotifyError(r);
   const data = (await r.json()) as {
     items?: { track: SpotifyTrack | null }[];
   };
@@ -342,16 +342,30 @@ export async function getPlaylistTracks(playlistId: string): Promise<SpotifyTrac
     .filter((t): t is SpotifyTrack => !!t && !!t.uri);
 }
 
+/**
+ * Custom error class for Spotify API failures. Carries the HTTP status so
+ * UI code can pattern-match on it (e.g. 403 → "Reconnect Spotify" CTA)
+ * instead of regex-matching the message string.
+ */
+export class SpotifyApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "SpotifyApiError";
+    this.status = status;
+  }
+}
+
 // Spotify wraps errors as { error: { status, message } }. Pull the
 // human-readable bit out so the UI doesn't show raw JSON.
-async function formatSpotifyError(r: Response): Promise<string> {
+async function formatSpotifyError(r: Response): Promise<SpotifyApiError> {
   const body = await r.text().catch(() => "");
+  let message = `Spotify returned ${r.status}`;
   try {
     const parsed = JSON.parse(body) as { error?: { message?: string } };
-    if (parsed?.error?.message) return `Spotify: ${parsed.error.message}`;
+    if (parsed?.error?.message) message = `Spotify: ${parsed.error.message}`;
   } catch {
-    /* fall through */
+    if (body) message = `Spotify ${r.status}: ${body.slice(0, 160)}`;
   }
-  if (body) return `Spotify ${r.status}: ${body.slice(0, 160)}`;
-  return `Spotify returned ${r.status}`;
+  return new SpotifyApiError(message, r.status);
 }

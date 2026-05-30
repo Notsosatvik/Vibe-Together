@@ -23,7 +23,15 @@ const SPOTIFY_SCOPES = [
   "user-read-playback-state",
   "user-modify-playback-state",
   "user-read-currently-playing",
+  // playlist-read-private gates access to the user's *own* private playlists,
+  // playlist-read-collaborative is required separately for the (very common)
+  // case of collaborative playlists. Missing the latter is what produces the
+  // "Spotify: Forbidden" 403 on /v1/playlists/{id}/tracks for shared playlists.
   "playlist-read-private",
+  "playlist-read-collaborative",
+  // Liked Songs — handy for the playlists tab even though we don't surface
+  // it as its own pseudo-playlist yet.
+  "user-library-read",
   "user-read-recently-played",
   "user-top-read",
 ].join(" ");

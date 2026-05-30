@@ -14,9 +14,11 @@ import {
   searchSpotifyTracks,
   getMyPlaylists,
   getPlaylistTracks,
+  SpotifyApiError,
   type SpotifyTrack,
   type SpotifyPlaylist,
 } from "@/lib/hooks/use-spotify-player";
+import { startSpotifyConnect } from "@/lib/api";
 
 type Tab = "search" | "playlists";
 
@@ -152,7 +154,7 @@ function SearchView({ onAdd }: { onAdd: (trackUri: string) => void }) {
   const [q, setQ] = useState("");
   const [results, setResults] = useState<SpotifyTrack[]>([]);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ message: string; needsReconnect: boolean } | null>(null);
   const debounceRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -173,7 +175,7 @@ function SearchView({ onAdd }: { onAdd: (trackUri: string) => void }) {
       } catch (e) {
         const msg = (e as { message?: string }).message ?? "Search failed";
         console.warn("[search] failed:", msg);
-        setError(msg);
+        setError({ message: msg, needsReconnect: isAuthLikeError(e) });
         setResults([]);
       } finally {
         setLoading(false);
@@ -200,7 +202,9 @@ function SearchView({ onAdd }: { onAdd: (trackUri: string) => void }) {
         )}
       </div>
 
-      {error && <InlineError message={error} />}
+      {error && (
+        <InlineError message={error.message} needsReconnect={error.needsReconnect} />
+      )}
 
       {results.length > 0 && (
         <ul className="mt-3 space-y-1 max-h-80 overflow-y-auto no-scrollbar">
@@ -234,7 +238,7 @@ function SearchView({ onAdd }: { onAdd: (trackUri: string) => void }) {
 function PlaylistsView({ onAdd }: { onAdd: (trackUri: string) => void }) {
   const [playlists, setPlaylists] = useState<SpotifyPlaylist[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ message: string; needsReconnect: boolean } | null>(null);
   const [selected, setSelected] = useState<SpotifyPlaylist | null>(null);
 
   useEffect(() => {
@@ -252,7 +256,7 @@ function PlaylistsView({ onAdd }: { onAdd: (trackUri: string) => void }) {
         if (cancelled) return;
         const msg = (e as Error).message ?? "Couldn't load playlists";
         console.warn("[playlists] failed:", msg);
-        setError(msg);
+        setError({ message: msg, needsReconnect: isAuthLikeError(e) });
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -281,7 +285,10 @@ function PlaylistsView({ onAdd }: { onAdd: (trackUri: string) => void }) {
     );
   }
 
-  if (error) return <InlineError message={error} />;
+  if (error)
+    return (
+      <InlineError message={error.message} needsReconnect={error.needsReconnect} />
+    );
 
   if (playlists.length === 0) {
     return (
@@ -347,7 +354,7 @@ function PlaylistTracksView({
 }) {
   const [tracks, setTracks] = useState<SpotifyTrack[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ message: string; needsReconnect: boolean } | null>(null);
   const [queueing, setQueueing] = useState(false);
 
   useEffect(() => {
@@ -365,7 +372,7 @@ function PlaylistTracksView({
         if (cancelled) return;
         const msg = (e as Error).message ?? "Couldn't load tracks";
         console.warn("[playlists] tracks failed:", msg);
-        setError(msg);
+        setError({ message: msg, needsReconnect: isAuthLikeError(e) });
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -424,7 +431,9 @@ function PlaylistTracksView({
         </div>
       )}
 
-      {error && <InlineError message={error} />}
+      {error && (
+        <InlineError message={error.message} needsReconnect={error.needsReconnect} />
+      )}
 
       {!loading && !error && tracks.length === 0 && (
         <div className="py-6 text-center text-xs text-white/50">
@@ -494,11 +503,42 @@ function TrackRow({
   );
 }
 
-function InlineError({ message }: { message: string }) {
+function InlineError({
+  message,
+  needsReconnect = false,
+}: {
+  message: string;
+  needsReconnect?: boolean;
+}) {
   return (
-    <div className="mt-3 flex items-start gap-2 rounded-lg border border-rose-400/30 bg-rose-400/[0.08] px-3 py-2 text-xs text-rose-200">
-      <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-      <span className="break-words">{message}</span>
+    <div className="mt-3 flex flex-col gap-2 rounded-lg border border-rose-400/30 bg-rose-400/[0.08] px-3 py-2 text-xs text-rose-200">
+      <div className="flex items-start gap-2">
+        <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+        <span className="break-words flex-1">{message}</span>
+      </div>
+      {needsReconnect && (
+        <div className="flex items-center gap-2 pl-5">
+          <span className="text-rose-200/80">
+            This usually means Spotify needs to be reconnected with updated
+            permissions.
+          </span>
+          <button
+            onClick={() => {
+              void startSpotifyConnect();
+            }}
+            className="rounded-md bg-rose-400/15 hover:bg-rose-400/25 border border-rose-400/30 px-2 py-0.5 text-[11px] font-medium transition-colors whitespace-nowrap"
+          >
+            Reconnect Spotify
+          </button>
+        </div>
+      )}
     </div>
+  );
+}
+
+/** True for any Spotify response that suggests our OAuth scopes are stale. */
+function isAuthLikeError(e: unknown): boolean {
+  return (
+    e instanceof SpotifyApiError && (e.status === 401 || e.status === 403)
   );
 }
