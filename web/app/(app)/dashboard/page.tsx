@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { Suspense, useEffect, useState, useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { motion } from "framer-motion";
 import { ArrowRight, Plus, Sparkles, Music2, Flame, Radio } from "lucide-react";
@@ -38,6 +38,14 @@ type ApiRoom = {
 };
 
 export default function DashboardPage() {
+  return (
+    <Suspense fallback={null}>
+      <DashboardInner />
+    </Suspense>
+  );
+}
+
+function DashboardInner() {
   const router = useRouter();
   const params = useSearchParams();
   const user = useUserStore((s) => s.user);

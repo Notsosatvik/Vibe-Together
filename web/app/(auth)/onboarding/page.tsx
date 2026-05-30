@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import { Check, Music, Sparkles, Users, Headphones } from "lucide-react";
@@ -23,6 +23,14 @@ const moods = [
 ];
 
 export default function OnboardingPage() {
+  return (
+    <Suspense fallback={null}>
+      <OnboardingInner />
+    </Suspense>
+  );
+}
+
+function OnboardingInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   // Force a refresh of /users/me whenever we land on onboarding —
