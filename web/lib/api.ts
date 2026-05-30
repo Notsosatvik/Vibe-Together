@@ -178,6 +178,18 @@ export async function startSpotifyConnect(returnTo?: string) {
   window.location.href = `${API_URL}/spotify/connect${qs ? `?${qs}` : ""}`;
 }
 
+// Diagnostic — calls /spotify/diagnose to see what scopes Spotify
+// actually granted us for the signed-in user's refresh token. Used by
+// the Settings page to surface scope problems without a Railway-logs trip.
+export type SpotifyDiagnoseResult = {
+  granted: string[];
+  requested: string[];
+  missing: string[];
+};
+export async function diagnoseSpotify(): Promise<SpotifyDiagnoseResult> {
+  return apiFetch<SpotifyDiagnoseResult>("/spotify/diagnose");
+}
+
 export async function logout(): Promise<void> {
   try {
     await apiFetch("/auth/logout", { method: "POST" });

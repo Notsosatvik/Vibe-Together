@@ -2,13 +2,18 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Check, Music, Shield, LogOut } from "lucide-react";
+import { Check, Music, Shield, LogOut, AlertTriangle, Loader2 } from "lucide-react";
 import { TopBar } from "@/components/app/topbar";
 import { GlassCard } from "@/components/ui/glass-card";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useUserStore } from "@/lib/store/user";
-import { logout, startSpotifyConnect } from "@/lib/api";
+import {
+  diagnoseSpotify,
+  logout,
+  startSpotifyConnect,
+  type SpotifyDiagnoseResult,
+} from "@/lib/api";
 
 const sections = [
   { id: "account", label: "Account", icon: Shield },
@@ -114,11 +119,114 @@ export default function SettingsPage() {
                 VibeTogether only reads playback state and sends play/pause/seek
                 commands to your device. We never modify your library or playlists.
               </div>
+
+              {user.spotifyId && <SpotifyDiagnosePanel />}
             </GlassCard>
           )}
         </div>
       </div>
     </>
+  );
+}
+
+// Diagnostic panel — hits /spotify/diagnose to show the exact scopes Spotify
+// pinned to the user's refresh token. Use when 403s are happening and we need
+// to know whether it's a scope problem or something else (region, account
+// restriction, deprecated endpoint).
+function SpotifyDiagnosePanel() {
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<SpotifyDiagnoseResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const onRun = async () => {
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    try {
+      const r = await diagnoseSpotify();
+      setResult(r);
+    } catch (e) {
+      setError((e as { message?: string }).message ?? "Failed to run diagnostic");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="mt-6 pt-6 border-t border-white/10">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="text-sm font-medium">Diagnose scopes</div>
+          <div className="text-xs text-white/55 mt-0.5">
+            Check what Spotify actually granted us. Run this if you're hitting
+            403 errors after reconnecting.
+          </div>
+        </div>
+        <button
+          onClick={onRun}
+          disabled={loading}
+          className="rounded-xl bg-white/[0.06] hover:bg-white/[0.1] border border-white/10 px-3 py-1.5 text-xs font-medium transition-colors flex items-center gap-1.5 disabled:opacity-60"
+        >
+          {loading && <Loader2 className="h-3 w-3 animate-spin" />}
+          {loading ? "Checking…" : "Run check"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="mt-3 flex items-start gap-2 rounded-lg border border-rose-400/30 bg-rose-400/[0.08] px-3 py-2 text-xs text-rose-200">
+          <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+          <span className="break-words flex-1">{error}</span>
+        </div>
+      )}
+
+      {result && (
+        <div className="mt-3 space-y-2 text-xs">
+          {result.missing.length === 0 ? (
+            <div className="flex items-center gap-2 rounded-lg border border-neon-green/30 bg-neon-green/[0.06] px-3 py-2 text-neon-green">
+              <Check className="h-3.5 w-3.5" />
+              <span>
+                All {result.granted.length} requested scopes granted.
+              </span>
+            </div>
+          ) : (
+            <div className="flex items-start gap-2 rounded-lg border border-amber-400/30 bg-amber-400/[0.08] px-3 py-2 text-amber-200">
+              <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+              <div>
+                <div className="font-medium">
+                  Missing {result.missing.length} scope
+                  {result.missing.length === 1 ? "" : "s"}:
+                </div>
+                <div className="font-mono text-[11px] opacity-90 mt-1">
+                  {result.missing.join(", ")}
+                </div>
+                <div className="mt-2 text-amber-200/80">
+                  Revoke at{" "}
+                  <a
+                    href="https://www.spotify.com/account/apps/"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="underline"
+                  >
+                    spotify.com/account/apps
+                  </a>{" "}
+                  and reconnect to fix.
+                </div>
+              </div>
+            </div>
+          )}
+          <details className="text-white/55">
+            <summary className="cursor-pointer hover:text-white/80 select-none">
+              Full scope list
+            </summary>
+            <div className="mt-2 font-mono text-[11px] whitespace-pre-wrap break-all bg-white/[0.03] border border-white/10 rounded p-2">
+              granted: {result.granted.join(" ") || "(none)"}
+              {"\n\n"}
+              requested: {result.requested.join(" ")}
+            </div>
+          </details>
+        </div>
+      )}
+    </div>
   );
 }
 
