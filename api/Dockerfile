@@ -21,4 +21,7 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/prisma ./prisma
 COPY package.json ./
 EXPOSE 4000
-CMD ["sh", "-c", "echo '===== DOCKERFILE CMD STARTING =====' && echo 'PORT env='$PORT && echo 'NODE_ENV='$NODE_ENV && echo 'API_PORT='$API_PORT && echo '===== running db push =====' && npx prisma db push --skip-generate --accept-data-loss && echo '===== db push done, launching node =====' && node dist/index.js ; echo '===== NODE EXITED (code='$?') ====='"]
+# db push can fail when Neon's free tier is auto-suspended — retry a few times
+# while Neon wakes up, then continue even if it ultimately fails. Node will
+# retry the DB connection at request time anyway.
+CMD ["sh", "-c", "echo '===== DOCKERFILE CMD STARTING =====' && echo 'PORT env='$PORT && echo 'NODE_ENV='$NODE_ENV && echo 'API_PORT='$API_PORT && for i in 1 2 3 4 5; do echo \"===== db push attempt $i =====\" && npx prisma db push --skip-generate --accept-data-loss && echo '===== db push OK =====' && break || echo \"===== db push failed, sleeping 6s =====\" && sleep 6; done; echo '===== launching node (db push may have failed, that is fine) =====' && node dist/index.js ; echo '===== NODE EXITED (code='$?') ====='"]
