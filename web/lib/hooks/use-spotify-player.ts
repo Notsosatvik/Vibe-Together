@@ -401,7 +401,9 @@ export type SpotifyPlaylist = {
   name: string;
   images: { url: string }[];
   tracks: { total: number };
-  owner: { display_name: string | null };
+  // owner.id is the canonical owner; "spotify" for editorial playlists,
+  // a username for user-owned ones. display_name is for showing only.
+  owner: { id: string; display_name: string | null };
 };
 
 /**
@@ -472,8 +474,21 @@ export class SpotifyApiError extends Error {
 
 // Spotify wraps errors as { error: { status, message } }. Pull the
 // human-readable bit out so the UI doesn't show raw JSON.
+//
+// Also dumps the full request URL + status + body + select headers to the
+// browser console so we can diagnose what Spotify is actually objecting to
+// when the human-readable error string is unhelpful (e.g. plain "Forbidden"
+// on a 403 we can't otherwise explain).
 async function formatSpotifyError(r: Response): Promise<SpotifyApiError> {
   const body = await r.text().catch(() => "");
+  // WWW-Authenticate often carries the *real* reason on 401/403 — for
+  // example, error="insufficient_scope" and the required scope list.
+  const wwwAuth = r.headers.get("www-authenticate") ?? "";
+  console.warn(
+    `[spotify-error] ${r.status} ${r.url}` +
+      (wwwAuth ? `\n  www-authenticate: ${wwwAuth}` : "") +
+      `\n  body: ${body.slice(0, 500)}`,
+  );
   let message = `Spotify returned ${r.status}`;
   try {
     const parsed = JSON.parse(body) as { error?: { message?: string } };
