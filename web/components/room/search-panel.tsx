@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Component, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Search,
   Plus,
@@ -67,13 +67,55 @@ export function SearchPanel({
         />
       </div>
 
-      {tab === "search" ? (
-        <SearchView onAdd={onAdd} />
-      ) : (
-        <PlaylistsView onAdd={onAdd} />
-      )}
+      <PanelErrorBoundary>
+        {tab === "search" ? (
+          <SearchView onAdd={onAdd} />
+        ) : (
+          <PlaylistsView onAdd={onAdd} />
+        )}
+      </PanelErrorBoundary>
     </div>
   );
+}
+
+/**
+ * Catches render-time crashes inside the search/playlists views so a single
+ * weird Spotify response (or stale chunk after a deploy) doesn't take the
+ * entire room down via the Next.js root error boundary.
+ *
+ * Class components are still the only way to implement error boundaries in
+ * React 19 — there's no `useErrorBoundary` hook in core React.
+ */
+class PanelErrorBoundary extends Component<
+  { children: ReactNode },
+  { error: Error | null }
+> {
+  state: { error: Error | null } = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: { componentStack?: string }) {
+    console.error("[SearchPanel] render crashed:", error, info);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="flex items-start gap-2 rounded-lg border border-rose-400/30 bg-rose-400/[0.08] px-3 py-2 text-xs text-rose-200">
+          <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+          <div className="break-words">
+            <div className="font-medium">Couldn&apos;t render this panel.</div>
+            <div className="text-rose-200/80">
+              {this.state.error.message ?? "Unknown error"} — try refreshing.
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 function TabButton({
@@ -251,34 +293,45 @@ function PlaylistsView({ onAdd }: { onAdd: (trackUri: string) => void }) {
 
   return (
     <ul className="space-y-1 max-h-96 overflow-y-auto no-scrollbar">
-      {playlists.map((p) => (
-        <li key={p.id}>
-          <button
-            onClick={() => setSelected(p)}
-            className="w-full flex items-center gap-3 rounded-lg px-2 py-2 hover:bg-white/[0.05] transition-colors text-left"
-          >
-            {p.images[0] ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={p.images[p.images.length - 1]?.url ?? p.images[0].url}
-                alt=""
-                className="h-11 w-11 rounded object-cover"
-              />
-            ) : (
-              <div className="grid h-11 w-11 place-items-center rounded bg-white/5">
-                <ListMusic className="h-4 w-4 text-white/40" />
+      {playlists.map((p) => {
+        // Defensive — Spotify sometimes returns playlists with missing
+        // images/tracks/owner (especially auto-generated ones like "Liked
+        // Songs" surrogates or freshly created playlists). Crashing the
+        // entire panel because of one row would be very rude.
+        const images = Array.isArray(p.images) ? p.images : [];
+        const thumb =
+          images[images.length - 1]?.url ?? images[0]?.url ?? null;
+        const trackTotal = p.tracks?.total ?? 0;
+        const ownerName = p.owner?.display_name ?? null;
+        return (
+          <li key={p.id}>
+            <button
+              onClick={() => setSelected(p)}
+              className="w-full flex items-center gap-3 rounded-lg px-2 py-2 hover:bg-white/[0.05] transition-colors text-left"
+            >
+              {thumb ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={thumb}
+                  alt=""
+                  className="h-11 w-11 rounded object-cover"
+                />
+              ) : (
+                <div className="grid h-11 w-11 place-items-center rounded bg-white/5">
+                  <ListMusic className="h-4 w-4 text-white/40" />
+                </div>
+              )}
+              <div className="min-w-0 flex-1">
+                <div className="text-sm truncate">{p.name ?? "Untitled playlist"}</div>
+                <div className="text-xs text-white/50 truncate">
+                  {trackTotal} track{trackTotal === 1 ? "" : "s"}
+                  {ownerName ? ` · ${ownerName}` : ""}
+                </div>
               </div>
-            )}
-            <div className="min-w-0 flex-1">
-              <div className="text-sm truncate">{p.name}</div>
-              <div className="text-xs text-white/50 truncate">
-                {p.tracks.total} track{p.tracks.total === 1 ? "" : "s"}
-                {p.owner.display_name ? ` · ${p.owner.display_name}` : ""}
-              </div>
-            </div>
-          </button>
-        </li>
-      ))}
+            </button>
+          </li>
+        );
+      })}
     </ul>
   );
 }
@@ -405,15 +458,19 @@ function TrackRow({
   track: SpotifyTrack;
   onAdd: () => void;
 }) {
+  // Defensive — same reasoning as PlaylistsView. Local/region-restricted
+  // tracks can come back with empty artists or no album images.
+  const images = Array.isArray(track.album?.images) ? track.album.images : [];
+  const thumb = images[images.length - 1]?.url ?? images[0]?.url ?? null;
+  const artistLine = Array.isArray(track.artists)
+    ? track.artists.map((a) => a?.name).filter(Boolean).join(", ")
+    : "";
   return (
     <li className="flex items-center gap-3 rounded-lg px-2 py-2 hover:bg-white/[0.05] transition-colors">
-      {track.album.images[0] ? (
+      {thumb ? (
         // eslint-disable-next-line @next/next/no-img-element
         <img
-          src={
-            track.album.images[track.album.images.length - 1]?.url ??
-            track.album.images[0].url
-          }
+          src={thumb}
           alt=""
           className="h-11 w-11 rounded object-cover"
         />
@@ -423,10 +480,8 @@ function TrackRow({
         </div>
       )}
       <div className="min-w-0 flex-1">
-        <div className="text-sm truncate">{track.name}</div>
-        <div className="text-xs text-white/50 truncate">
-          {track.artists.map((a) => a.name).join(", ")}
-        </div>
+        <div className="text-sm truncate">{track.name ?? "Untitled track"}</div>
+        <div className="text-xs text-white/50 truncate">{artistLine}</div>
       </div>
       <button
         onClick={onAdd}
