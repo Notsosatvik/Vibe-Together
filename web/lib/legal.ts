@@ -24,11 +24,10 @@ export const LEGAL_APP_URL = "https://vibe-together.vercel.app" as const;
 // they're contracting with.
 export const LEGAL_OPERATOR_NAME = "Satwik Handa" as const;
 
-// FIXME: replace with a real, monitored address. Gmail / personal addresses
-// are fine — Spotify just wants a reachable contact for data requests. If you
-// own the domain, prefer something@vibe-together.vercel.app (or your real
-// domain once you have one).
-export const LEGAL_CONTACT_EMAIL = "vibetogether.support@gmail.com" as const;
+// Reachable contact for data requests and Spotify reviewer questions.
+// Gmail is fine — Spotify just wants an address a human actually reads.
+// If you register a domain later, swap this to something@your-domain.
+export const LEGAL_CONTACT_EMAIL = "satwikhanda10@gmail.com" as const;
 
 // Governing law for the Terms of Service. Default: India (where the operator
 // resides). Change if you live elsewhere or if you've incorporated.
