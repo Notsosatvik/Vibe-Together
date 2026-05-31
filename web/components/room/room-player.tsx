@@ -16,8 +16,15 @@ import {
   pausePlayback,
   seekPlayback,
 } from "@/lib/hooks/use-spotify-player";
-import { getSocket, computeTargetPosition, type PlaybackState, type QueueItemDTO, type RoomStateDTO } from "@/lib/socket";
-import { SearchPanel } from "./search-panel";
+import {
+  getSocket,
+  computeTargetPosition,
+  serverNow,
+  type PlaybackState,
+  type QueueItemDTO,
+  type RoomStateDTO,
+} from "@/lib/socket";
+import { SearchPanel, type OptimisticTrack } from "./search-panel";
 import { NowPlaying, QueueList } from "./now-playing";
 
 type SocketStatus =
@@ -287,13 +294,45 @@ export function RoomPlayer({
   }, [deviceId, playerStatus, playback.isPlaying, playback.trackUri, getCurrentState]);
 
   // -------------------------------------------------------------------------
-  // Host actions — emit socket events; server is authoritative.
+  // Host actions — emit socket events AND optimistically update local state.
   // -------------------------------------------------------------------------
+  // The room-player used to wait for the server to broadcast playback:state /
+  // queue:update back before flipping the button icon or showing the new
+  // queued track. On Railway with US-east users that round-trip is 200-700ms
+  // — long enough to feel like a stuck button. Now every host action mutates
+  // local state synchronously and the server broadcast just reconciles
+  // (idempotently — setting isPlaying=true twice is fine).
   const currentTrack: QueueItemDTO | null =
     queue.find((q) => q.trackUri === playback.trackUri) ?? null;
 
-  const onAddToQueue = (trackUri: string) => {
-    getSocket().emit("queue:add", { roomId, trackUri });
+  // Bump a counter to mint stable but unique placeholder IDs for optimistic
+  // queue rows. Server's broadcast will replace these with real DB ids.
+  const optimisticIdRef = useRef(0);
+
+  const onAddToQueue = (track: OptimisticTrack) => {
+    const sock = getSocket();
+    sock.emit("queue:add", { roomId, trackUri: track.uri });
+    // Optimistically insert the row at the end of the queue. The server's
+    // queue:update broadcast will reconcile (the placeholder will be
+    // displaced by the canonical QueueItemDTO with a real database id).
+    setQueue((prev) => {
+      if (prev.some((q) => q.trackUri === track.uri && q.id.startsWith("opt-"))) {
+        return prev;
+      }
+      optimisticIdRef.current += 1;
+      const optimistic: QueueItemDTO = {
+        id: `opt-${optimisticIdRef.current}`,
+        trackUri: track.uri,
+        trackName: track.name,
+        artistName: track.artistName,
+        albumArtUrl: track.albumArtUrl,
+        durationMs: track.durationMs,
+        addedById: "me",
+        position:
+          (prev.length > 0 ? Math.max(...prev.map((q) => q.position)) : -1) + 1,
+      };
+      return [...prev, optimistic];
+    });
   };
 
   const onPlay = () => {
@@ -301,6 +340,14 @@ export function RoomPlayer({
       // Nothing playing yet — start the first queued track.
       const first = queue[0];
       if (!first) return;
+      // Optimistic: treat the first track as now-playing immediately so the
+      // host's tab issues playTrackOnDevice without waiting for the server.
+      setPlayback({
+        trackUri: first.trackUri,
+        isPlaying: true,
+        positionMs: 0,
+        lastSyncAt: serverNow(),
+      });
       getSocket().emit("playback:play", {
         roomId,
         positionMs: 0,
@@ -309,6 +356,14 @@ export function RoomPlayer({
       return;
     }
     const target = computeTargetPosition(playback);
+    // Optimistic: flip to playing now so the icon updates and the mirror
+    // effect re-issues PUT /me/player/play at the projected position.
+    setPlayback((cur) => ({
+      ...cur,
+      isPlaying: true,
+      positionMs: target,
+      lastSyncAt: serverNow(),
+    }));
     getSocket().emit("playback:play", {
       roomId,
       positionMs: target,
@@ -318,11 +373,40 @@ export function RoomPlayer({
 
   const onPause = () => {
     const target = computeTargetPosition(playback);
+    setPlayback((cur) => ({
+      ...cur,
+      isPlaying: false,
+      positionMs: target,
+      lastSyncAt: serverNow(),
+    }));
     getSocket().emit("playback:pause", { roomId, positionMs: target });
   };
 
   const onSkip = () => {
-    getSocket().emit("playback:next", { roomId });
+    // Optimistic: advance to the next unplayed queue item right now.
+    const upcoming = queue.filter(
+      (q) => q.trackUri !== playback.trackUri && !q.id.startsWith("opt-"),
+    );
+    const next = upcoming[0];
+    if (next) {
+      setPlayback({
+        trackUri: next.trackUri,
+        isPlaying: true,
+        positionMs: 0,
+        lastSyncAt: serverNow(),
+      });
+    } else {
+      // No queue left — optimistically pause; server will catch up.
+      setPlayback((cur) => ({
+        ...cur,
+        isPlaying: false,
+        lastSyncAt: serverNow(),
+      }));
+    }
+    getSocket().emit("playback:next", {
+      roomId,
+      expectedTrackUri: playback.trackUri ?? undefined,
+    });
   };
 
   // Manual retry button for the playback-error banner. Just nudges the

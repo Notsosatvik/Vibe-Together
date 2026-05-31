@@ -23,6 +23,36 @@ import { startSpotifyConnect } from "@/lib/api";
 type Tab = "search" | "playlists";
 
 /**
+ * Snapshot of the metadata we need to optimistically render a queue row before
+ * the server confirms the add. The room player adds an "opt-…" placeholder
+ * using these fields, then swaps it out when `room:state` arrives with the
+ * authoritative QueueItemDTO.
+ */
+export type OptimisticTrack = {
+  uri: string;
+  name: string;
+  artistName: string;
+  albumArtUrl: string | null;
+  durationMs: number;
+};
+
+/** Convert a raw Spotify catalog track into the shape the queue UI expects. */
+function toOptimistic(track: SpotifyTrack): OptimisticTrack {
+  const images = Array.isArray(track.album?.images) ? track.album.images : [];
+  const albumArtUrl = images[0]?.url ?? images[images.length - 1]?.url ?? null;
+  const artistName = Array.isArray(track.artists)
+    ? track.artists.map((a) => a?.name).filter(Boolean).join(", ")
+    : "";
+  return {
+    uri: track.uri,
+    name: track.name ?? "Untitled track",
+    artistName,
+    albumArtUrl,
+    durationMs: track.duration_ms ?? 0,
+  };
+}
+
+/**
  * Host's "Add music" surface. Two tabs:
  *   - Search:    typeahead against Spotify's catalog
  *   - Playlists: browse the playlists the user already follows/owns
@@ -35,7 +65,7 @@ type Tab = "search" | "playlists";
 export function SearchPanel({
   onAdd,
 }: {
-  onAdd: (trackUri: string) => void;
+  onAdd: (track: OptimisticTrack) => void;
 }) {
   const [tab, setTab] = useState<Tab>("search");
 
@@ -150,7 +180,7 @@ function TabButton({
 // Search tab
 // ===========================================================================
 
-function SearchView({ onAdd }: { onAdd: (trackUri: string) => void }) {
+function SearchView({ onAdd }: { onAdd: (track: OptimisticTrack) => void }) {
   const [q, setQ] = useState("");
   const [results, setResults] = useState<SpotifyTrack[]>([]);
   const [loading, setLoading] = useState(false);
@@ -213,7 +243,7 @@ function SearchView({ onAdd }: { onAdd: (trackUri: string) => void }) {
               key={t.uri}
               track={t}
               onAdd={() => {
-                onAdd(t.uri);
+                onAdd(toOptimistic(t));
                 setQ("");
                 setResults([]);
               }}
@@ -235,7 +265,7 @@ function SearchView({ onAdd }: { onAdd: (trackUri: string) => void }) {
 // My Playlists tab
 // ===========================================================================
 
-function PlaylistsView({ onAdd }: { onAdd: (trackUri: string) => void }) {
+function PlaylistsView({ onAdd }: { onAdd: (track: OptimisticTrack) => void }) {
   const [playlists, setPlaylists] = useState<SpotifyPlaylist[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<{ message: string; needsReconnect: boolean } | null>(null);
@@ -350,7 +380,7 @@ function PlaylistTracksView({
 }: {
   playlist: SpotifyPlaylist;
   onBack: () => void;
-  onAdd: (trackUri: string) => void;
+  onAdd: (track: OptimisticTrack) => void;
 }) {
   const [tracks, setTracks] = useState<SpotifyTrack[]>([]);
   const [loading, setLoading] = useState(true);
@@ -390,7 +420,7 @@ function PlaylistTracksView({
     setQueueing(true);
     try {
       for (const t of tracks) {
-        onAdd(t.uri);
+        onAdd(toOptimistic(t));
         await new Promise((r) => setTimeout(r, 90));
       }
     } finally {
@@ -447,7 +477,7 @@ function PlaylistTracksView({
             <TrackRow
               key={`${t.uri}-${i}`}
               track={t}
-              onAdd={() => onAdd(t.uri)}
+              onAdd={() => onAdd(toOptimistic(t))}
             />
           ))}
         </ul>
