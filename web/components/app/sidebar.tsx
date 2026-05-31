@@ -190,6 +190,35 @@ export function Sidebar() {
             <LogOut className="h-4 w-4" />
           </button>
         </div>
+
+        {/* Legal strip — required to surface our Privacy / Terms / Cookies /
+            Spotify Disclosure pages from inside the signed-in app, not just
+            from the marketing footer. The Spotify Extension Request reviewer
+            will be testing the in-app experience and needs to be able to
+            find these in one tap from any room or dashboard screen. */}
+        <nav
+          aria-label="Legal"
+          className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 px-2 text-[10px] text-white/35"
+        >
+          <Link href="/privacy" className="hover:text-white/70 transition-colors">
+            Privacy
+          </Link>
+          <span aria-hidden>·</span>
+          <Link href="/terms" className="hover:text-white/70 transition-colors">
+            Terms
+          </Link>
+          <span aria-hidden>·</span>
+          <Link href="/cookies" className="hover:text-white/70 transition-colors">
+            Cookies
+          </Link>
+          <span aria-hidden>·</span>
+          <Link
+            href="/spotify-disclosure"
+            className="hover:text-white/70 transition-colors"
+          >
+            Spotify disclosure
+          </Link>
+        </nav>
       </div>
     </aside>
   );

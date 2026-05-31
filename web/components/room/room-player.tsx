@@ -424,6 +424,21 @@ export function RoomPlayer({
   const currentTrack: QueueItemDTO | null =
     queue.find((q) => q.trackUri === playback.trackUri) ?? null;
 
+  // The next track in the queue — what plays after the current song ends or
+  // gets skipped. Used by NowPlaying to surface an "Up next: …" peek so the
+  // room knows what's coming without having to scroll to the queue list.
+  // We filter out optimistic placeholders (their metadata is fine, but if
+  // the user added two tracks fast we want to show the FIRST real one).
+  const nextTrack: QueueItemDTO | null = (() => {
+    if (!currentTrack) {
+      // Nothing playing yet — "next" is the head of the queue.
+      return queue.find((q) => !q.id.startsWith("opt-")) ?? queue[0] ?? null;
+    }
+    const idx = queue.findIndex((q) => q.id === currentTrack.id);
+    if (idx < 0) return null;
+    return queue.slice(idx + 1).find((q) => q.trackUri !== currentTrack.trackUri) ?? null;
+  })();
+
   // Bump a counter to mint stable but unique placeholder IDs for optimistic
   // queue rows. Server's broadcast will replace these with real DB ids.
   const optimisticIdRef = useRef(0);
@@ -452,6 +467,25 @@ export function RoomPlayer({
       };
       return [...prev, optimistic];
     });
+    // If this is the FIRST track in an empty room, immediately start playing
+    // it — no extra Play tap required. Spotify-style "tap to play" UX: a
+    // click on a search result should produce audio, not a silent queue
+    // entry that the user then has to chase a Play button to actually hear.
+    //
+    // We only auto-start for hosts. Listeners can't drive playback.
+    if (isHost && !playback.trackUri) {
+      setPlayback({
+        trackUri: track.uri,
+        isPlaying: true,
+        positionMs: 0,
+        lastSyncAt: serverNow(),
+      });
+      sock.emit("playback:play", {
+        roomId,
+        positionMs: 0,
+        trackUri: track.uri,
+      });
+    }
   };
 
   const onPlay = () => {
@@ -662,6 +696,7 @@ export function RoomPlayer({
         <NowPlaying
           playback={playback}
           currentTrack={currentTrack}
+          nextTrack={nextTrack}
           isHost={isHost}
           onPlay={onPlay}
           onPause={onPause}

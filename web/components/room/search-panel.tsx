@@ -508,30 +508,41 @@ function TrackRow({
   const artistLine = Array.isArray(track.artists)
     ? track.artists.map((a) => a?.name).filter(Boolean).join(", ")
     : "";
+  // The whole row is clickable now — users expect Spotify-style behaviour
+  // where tapping anywhere on a track row queues it (and the room player
+  // upgrades a tap on an empty queue into "play immediately"). The Plus
+  // icon stays as an affordance but is decorative; the click target is the
+  // entire row.
   return (
-    <li className="flex items-center gap-3 rounded-lg px-2 py-2 hover:bg-white/[0.05] transition-colors">
-      {thumb ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={thumb}
-          alt=""
-          className="h-11 w-11 rounded object-cover"
-        />
-      ) : (
-        <div className="grid h-11 w-11 place-items-center rounded bg-white/5">
-          <Music className="h-4 w-4 text-white/40" />
-        </div>
-      )}
-      <div className="min-w-0 flex-1">
-        <div className="text-sm truncate">{track.name ?? "Untitled track"}</div>
-        <div className="text-xs text-white/50 truncate">{artistLine}</div>
-      </div>
+    <li>
       <button
+        type="button"
         onClick={onAdd}
-        className="grid h-9 w-9 place-items-center rounded-lg bg-brand-gradient text-ink-950 hover:brightness-110 transition-all"
-        title="Add to queue"
+        className="w-full flex items-center gap-3 rounded-lg px-2 py-2 hover:bg-white/[0.05] active:bg-white/[0.08] transition-colors text-left group"
+        title="Tap to queue (or play, if nothing's playing)"
       >
-        <Plus className="h-4 w-4" />
+        {thumb ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={thumb}
+            alt=""
+            className="h-11 w-11 rounded object-cover"
+          />
+        ) : (
+          <div className="grid h-11 w-11 place-items-center rounded bg-white/5">
+            <Music className="h-4 w-4 text-white/40" />
+          </div>
+        )}
+        <div className="min-w-0 flex-1">
+          <div className="text-sm truncate">{track.name ?? "Untitled track"}</div>
+          <div className="text-xs text-white/50 truncate">{artistLine}</div>
+        </div>
+        <span
+          aria-hidden
+          className="grid h-9 w-9 place-items-center rounded-lg bg-brand-gradient text-ink-950 opacity-80 group-hover:opacity-100 group-hover:brightness-110 transition-all shrink-0"
+        >
+          <Plus className="h-4 w-4" />
+        </span>
       </button>
     </li>
   );
