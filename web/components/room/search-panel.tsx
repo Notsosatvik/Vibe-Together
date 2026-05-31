@@ -13,6 +13,7 @@ import {
 import {
   searchSpotifyTracks,
   getMyPlaylists,
+  playlistTrackTotal,
   getPlaylistTracks,
   SpotifyApiError,
   type SpotifyTrack,
@@ -338,7 +339,10 @@ function PlaylistsView({ onAdd }: { onAdd: (track: OptimisticTrack) => void }) {
         const images = Array.isArray(p.images) ? p.images : [];
         const thumb =
           images[images.length - 1]?.url ?? images[0]?.url ?? null;
-        const trackTotal = p.tracks?.total ?? 0;
+        // Spotify renamed playlist.tracks.total → playlist.items.total in
+        // the Feb 2026 Web API migration. playlistTrackTotal() prefers the
+        // new field with the old one as fallback.
+        const trackTotal = playlistTrackTotal(p);
         const ownerName = p.owner?.display_name ?? null;
         return (
           <li key={p.id}>

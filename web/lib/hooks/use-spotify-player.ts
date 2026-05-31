@@ -544,11 +544,30 @@ export type SpotifyPlaylist = {
   id: string;
   name: string;
   images: { url: string }[];
-  tracks: { total: number };
+  // Post-Feb-2026 Spotify Web API migration: the field that holds the
+  // track count on a playlist object was renamed from `tracks` to `items`.
+  // Old apps that read `tracks.total` get `undefined` (or `0`) on new
+  // responses, which is why our "X tracks" badge showed "0 tracks" even
+  // for huge playlists. Both fields are typed as optional so the count
+  // helper can prefer the new one and fall back to the legacy one during
+  // the transition window.
+  //
+  // Migration ref:
+  //   https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide
+  items?: { total: number };
+  tracks?: { total: number };
   // owner.id is the canonical owner; "spotify" for editorial playlists,
   // a username for user-owned ones. display_name is for showing only.
   owner: { id: string; display_name: string | null };
 };
+
+/**
+ * Pull the track total off a playlist regardless of which schema the
+ * upstream returned. Centralised so the migration tax stays in one place.
+ */
+export function playlistTrackTotal(p: SpotifyPlaylist): number {
+  return p.items?.total ?? p.tracks?.total ?? 0;
+}
 
 /**
  * List the signed-in user's Spotify playlists (the ones they own *or* follow).
