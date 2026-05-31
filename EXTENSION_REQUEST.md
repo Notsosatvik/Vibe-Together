@@ -1,14 +1,48 @@
 # Spotify Extension Request — VibeTogether
 
+> **🚨 IMPORTANT — Read this before doing anything else. (Updated 2026-05-31.)**
+>
+> The "Extension Request" / "Quota Extension Request" tab in the Developer
+> Dashboard **no longer exists** for new apps. Spotify changed the process on
+> **May 15, 2025**: the in-dashboard tab is gated behind a separate **Partner
+> Application** (a Google Form), and the form only accepts:
+>
+>   - **Organizations / companies** — not individuals
+>   - **250,000+ MAUs** already on the app
+>   - A **company email** address (Gmail will be rejected)
+>
+> VibeTogether as it stands today (solo developer, Gmail, hobby project, zero
+> MAUs) **does not qualify** for the Partner Application. Until the
+> Partner Application is approved, the Settings → "Quota Extension Request"
+> tab is invisible on the app's dashboard page.
+>
+> **Practical reality:** stay in **Development Mode** and use the
+> **User Management** allowlist (up to 25 Spotify accounts) to give friends
+> and beta testers access. That tab DOES exist on every new app today, and
+> the rest of this document still applies if/when VibeTogether later
+> incorporates and hits the MAU threshold.
+>
+> The Partner Application form (only useful if you've incorporated and have
+> 250K+ MAUs):
+> <https://docs.google.com/forms/d/1O87xdPP1zWUDyHnduwbEFpcjA57JOaefCgBShKjAqlo>
+>
+> Spotify's own documentation describing this new flow:
+> <https://developer.spotify.com/documentation/web-api/concepts/quota-modes>
+
+---
+
 This document is the source of truth for the Extension Request submission
 (formerly called "Quota Extension" / "Production Mode"). It contains the
 copy you'll paste into Spotify's form, the per-scope justification reviewers
 look for, and a screen-recording checklist.
 
 You ultimately have to click "Submit" yourself at
-<https://developer.spotify.com/dashboard> → your app → **Extension Request**,
-because Spotify requires the *registered owner* of the app to send it. Everything
-below is so you can do that submission in roughly 15 minutes without thinking.
+<https://developer.spotify.com/dashboard> → your app → **Settings → Quota
+Extension Request** (only visible *after* a Partner Application has been
+approved — see the warning box above), because Spotify requires the
+*registered owner* of the app to send it. Everything below is so you can
+do that submission in roughly 15 minutes without thinking, on the day the
+tab finally appears.
 
 > **Status: 2026-05-31** — Everything in this repo is ready. Before submitting:
 > 1. Edit `web/lib/legal.ts` if the defaults aren't right (operator name = your
@@ -234,8 +268,34 @@ Keep it under three minutes. Reviewers triage many of these per day.
 
 ## 6. Step-by-step: actually submitting the form
 
+> **Re-read the warning box at the very top of this file first.** As of
+> May 15, 2025 the in-dashboard "Quota Extension Request" tab is only
+> visible AFTER a Spotify Partner Application has been approved, and the
+> Partner Application has hard organization / 250K MAU gates. If your
+> Dashboard doesn't show Settings → "Quota Extension Request" at all,
+> that's normal — it's hidden until the Partner Application clears.
+
 You (the registered owner of the Spotify app) must do this part. Claude
 cannot — Spotify requires the OAuth-account holder.
+
+### 6a. Today: the User Management allowlist (Development Mode)
+
+Until the Partner Application is approved, your app lives in **Development
+Mode** with a 25-Spotify-account allowlist. Adding a friend:
+
+1. Open https://developer.spotify.com/dashboard and pick **VibeTogether**.
+2. Click the **User Management** tab.
+3. Click **Add new user**, paste the friend's **Spotify display name** AND
+   the **email address they use to sign into Spotify** (both are required).
+4. Click **Add**. The user can now sign into VibeTogether immediately.
+
+Repeat for up to 25 users. That's it — nothing else is needed for friends
+and a small private beta to use the app.
+
+### 6b. Later: submitting the Quota Extension Request (when eligible)
+
+This section is preserved for future use, after you've incorporated and
+the Partner Application has cleared.
 
 1. **Make sure the deploy is live.** Open
    https://vibe-together.vercel.app/privacy ,
@@ -245,8 +305,9 @@ cannot — Spotify requires the OAuth-account holder.
 2. **Open** https://developer.spotify.com/dashboard and pick the
    VibeTogether app.
 
-3. **App settings → "Extension Request"** (in some accounts it's labeled
-   "Quota Extension Request" — same thing).
+3. **Click Settings → "Quota Extension Request"**. (If this tab doesn't
+   exist on your app, re-read the warning at the top — it means the
+   Partner Application step hasn't been approved yet.)
 
 4. **Paste the app description** from section 1 of this file.
 
@@ -260,11 +321,11 @@ cannot — Spotify requires the OAuth-account holder.
 
 7. **Upload (or link) the screen recording** from section 5.
 
-8. **Submit.**
+8. **Submit.** The app detail page shows "Sent" in blue. Review can take
+   up to **six weeks** in 2026 (was 5–10 business days pre-2025).
 
-9. **Watch the email inbox you configured** in `web/lib/legal.ts` —
-   Spotify responds within 5–10 business days with either an approval or a
-   request for changes. The most common rework reasons:
+9. **Watch the email inbox you configured** in `web/lib/legal.ts`. Common
+   rework reasons:
     - "Scope X not demonstrated in recording" → re-record covering that
       scope, reply with the new link.
     - "Operator name unclear" → set `LEGAL_OPERATOR_NAME` in
