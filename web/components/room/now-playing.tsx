@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Play, Pause, SkipForward, Music, X } from "lucide-react";
 import type { PlaybackState, QueueItemDTO } from "@/lib/socket";
 import { computeTargetPosition } from "@/lib/socket";
@@ -19,6 +19,7 @@ export function NowPlaying({
   onPlay,
   onPause,
   onSkip,
+  onSeek,
 }: {
   playback: PlaybackState;
   currentTrack: QueueItemDTO | null;
@@ -26,20 +27,70 @@ export function NowPlaying({
   onPlay: () => void;
   onPause: () => void;
   onSkip: () => void;
+  // Move the playhead to an absolute position in ms. Optional so the
+  // component still renders for listeners (server-side seek is host-only,
+  // so the prop is undefined for non-hosts and the bar is read-only).
+  onSeek?: (positionMs: number) => void;
 }) {
   const [position, setPosition] = useState(0);
+  // While the user is actively dragging the scrubber we suspend the
+  // animation effect — otherwise the playhead would snap back and forth
+  // between the drag location and the live position on every frame.
+  const [scrubMs, setScrubMs] = useState<number | null>(null);
+  const barRef = useRef<HTMLDivElement | null>(null);
 
   // Smoothly animate the playhead based on the canonical playback state.
   useEffect(() => {
+    if (scrubMs != null) return; // dragging — don't fight the user
     const update = () => setPosition(computeTargetPosition(playback));
     update();
     if (!playback.isPlaying) return;
     const interval = window.setInterval(update, 250);
     return () => window.clearInterval(interval);
-  }, [playback]);
+  }, [playback, scrubMs]);
 
   const duration = currentTrack?.durationMs ?? 0;
-  const progress = duration ? Math.min(100, (position / duration) * 100) : 0;
+  const displayPosition = scrubMs ?? position;
+  const progress = duration
+    ? Math.min(100, (displayPosition / duration) * 100)
+    : 0;
+
+  // Translate a pointer X coordinate inside the bar into a position in ms.
+  // Clamped to [0, duration] so dragging off the edge doesn't seek negative
+  // or past the end of the track.
+  const xToMs = (clientX: number): number => {
+    const bar = barRef.current;
+    if (!bar || !duration) return 0;
+    const rect = bar.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    return Math.round(ratio * duration);
+  };
+
+  const seekable = isHost && !!onSeek && duration > 0;
+
+  // Click anywhere on the bar = seek to that point. The whole drag flow is
+  // wired through pointer events (works for mouse + touch + pen) and uses
+  // setPointerCapture so the drag continues even if the cursor leaves the
+  // bar.
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!seekable) return;
+    e.preventDefault();
+    (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
+    setScrubMs(xToMs(e.clientX));
+  };
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!seekable) return;
+    if (scrubMs == null) return; // only follow when actively dragging
+    setScrubMs(xToMs(e.clientX));
+  };
+  const onPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!seekable) return;
+    const target = xToMs(e.clientX);
+    (e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId);
+    setScrubMs(null);
+    onSeek?.(target);
+  };
+  const onPointerCancel = () => setScrubMs(null);
 
   if (!currentTrack) {
     return (
@@ -89,16 +140,59 @@ export function NowPlaying({
         </div>
       </div>
 
-      {/* Progress bar */}
+      {/* Progress bar — clickable + draggable for the host. We keep the
+          inner bar at 1px but add 16px of padding above/below so the hit
+          target is comfortable on touch without making the bar look thick. */}
       <div className="mt-5">
-        <div className="h-1 w-full overflow-hidden rounded-full bg-white/8">
-          <div
-            className="h-full bg-brand-gradient transition-[width] duration-200 ease-linear"
-            style={{ width: `${progress}%` }}
-          />
+        <div
+          ref={barRef}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerCancel}
+          className={`group relative h-1 w-full rounded-full bg-white/8 ${
+            seekable ? "cursor-pointer touch-none" : ""
+          }`}
+          role={seekable ? "slider" : undefined}
+          aria-valuemin={seekable ? 0 : undefined}
+          aria-valuemax={seekable ? duration : undefined}
+          aria-valuenow={seekable ? displayPosition : undefined}
+          aria-label={seekable ? "Seek" : undefined}
+          style={{
+            // Pad the hit area without changing the visible bar height.
+            padding: "12px 0",
+            marginTop: "-12px",
+            marginBottom: "-12px",
+            // Keep the inner gradient + thumb anchored to the visible 1px
+            // bar via a child wrapper below.
+            background: "transparent",
+          }}
+        >
+          {/* The visible bar (1px), positioned in the centre of the
+              hit-target. */}
+          <div className="relative h-1 w-full overflow-visible rounded-full bg-white/8">
+            <div
+              className={`h-full rounded-full bg-brand-gradient ${
+                scrubMs == null ? "transition-[width] duration-200 ease-linear" : ""
+              }`}
+              style={{ width: `${progress}%` }}
+            />
+            {/* Thumb — only visible to the host, and only when hovering
+                or actively dragging. Sits dead-centre on the playhead. */}
+            {seekable && (
+              <div
+                className={`pointer-events-none absolute top-1/2 -translate-y-1/2 -translate-x-1/2 h-3 w-3 rounded-full bg-white shadow-lg shadow-black/40 transition-opacity ${
+                  scrubMs != null
+                    ? "opacity-100"
+                    : "opacity-0 group-hover:opacity-100"
+                }`}
+                style={{ left: `${progress}%` }}
+              />
+            )}
+          </div>
         </div>
         <div className="mt-1.5 flex items-center justify-between text-[11px] text-white/45 tabular-nums">
-          <span>{formatTime(position)}</span>
+          <span>{formatTime(displayPosition)}</span>
           <span>{formatTime(duration)}</span>
         </div>
       </div>

@@ -73,11 +73,20 @@ export function RoomPlayer({
   // exactly which Spotify call failed and can hit Retry.
   const [playbackError, setPlaybackError] = useState<string | null>(null);
 
-  // Track the last (trackUri,isPlaying) pair we asked our local Spotify to play
-  // so we don't keep re-issuing the same play command on every state tick.
-  const lastAppliedRef = useRef<{ trackUri: string | null; isPlaying: boolean }>({
+  // Track what we last asked our local Spotify to play. We carry positionMs +
+  // lastSyncAt too so we can detect *seeks* (positionMs jumps relative to
+  // what natural playback would have produced) and snap the SDK without
+  // waiting for the periodic drift-correction interval.
+  const lastAppliedRef = useRef<{
+    trackUri: string | null;
+    isPlaying: boolean;
+    positionMs: number;
+    lastSyncAt: number;
+  }>({
     trackUri: null,
     isPlaying: false,
+    positionMs: 0,
+    lastSyncAt: 0,
   });
 
   // Mirror playback into a ref so callbacks (track-end, drift-correct) can
@@ -277,11 +286,18 @@ export function RoomPlayer({
           // Reset lastApplied so the next playback:state tick re-triggers
           // the play call — otherwise we'd never recover from a transient
           // error without a manual page reload.
-          lastAppliedRef.current = { trackUri: null, isPlaying: false };
+          lastAppliedRef.current = {
+            trackUri: null,
+            isPlaying: false,
+            positionMs: 0,
+            lastSyncAt: 0,
+          };
         });
       lastAppliedRef.current = {
         trackUri: playback.trackUri,
         isPlaying: playback.isPlaying,
+        positionMs: playback.positionMs,
+        lastSyncAt: playback.lastSyncAt,
       };
     } else if (playback.isPlaying && playStateChanged) {
       // Same track, paused → playing. Resume the SDK locally. No buffer hit.
@@ -300,6 +316,8 @@ export function RoomPlayer({
       lastAppliedRef.current = {
         trackUri: playback.trackUri,
         isPlaying: true,
+        positionMs: playback.positionMs,
+        lastSyncAt: playback.lastSyncAt,
       };
     } else if (!playback.isPlaying && playStateChanged) {
       // Playing → paused. Local SDK pause; fall back to Web API if SDK isn't
@@ -315,9 +333,36 @@ export function RoomPlayer({
       lastAppliedRef.current = {
         trackUri: playback.trackUri,
         isPlaying: false,
+        positionMs: playback.positionMs,
+        lastSyncAt: playback.lastSyncAt,
+      };
+    } else if (
+      playback.isPlaying &&
+      playback.lastSyncAt !== lastAppliedRef.current.lastSyncAt
+    ) {
+      // Same track, same play/pause state, but the server pushed a fresh
+      // state with a new lastSyncAt. The only thing that produces this is
+      // a server-side seek (PUT /playback:seek). Compare the new positionMs
+      // to where natural playback would have advanced to — if they diverge
+      // by more than 500 ms it's a real seek and we snap the SDK
+      // immediately instead of waiting for the next drift-correction tick.
+      //
+      // The 500 ms tolerance keeps us from seeking on every playback:tick
+      // (which intentionally bumps positionMs forward by ~5s every 5s).
+      const expected =
+        lastAppliedRef.current.positionMs +
+        (playback.lastSyncAt - lastAppliedRef.current.lastSyncAt);
+      const jump = Math.abs(playback.positionMs - expected);
+      if (jump > 500) {
+        void localSeek(playback.positionMs);
+      }
+      lastAppliedRef.current = {
+        ...lastAppliedRef.current,
+        positionMs: playback.positionMs,
+        lastSyncAt: playback.lastSyncAt,
       };
     }
-  }, [deviceId, playerStatus, playback, localPause, localResume]);
+  }, [deviceId, playerStatus, playback, localPause, localResume, localSeek]);
 
   // -------------------------------------------------------------------------
   // Periodic drift correction.
@@ -483,6 +528,31 @@ export function RoomPlayer({
     });
   };
 
+  // Host scrubs the progress bar. We want this to FEEL instant — the bar should
+  // jump under the finger and the audio should re-cue immediately — so we do
+  // three things in parallel:
+  //   1. Optimistically update local playback state (positionMs + lastSyncAt)
+  //      so the progress bar in this tab snaps to the new position and the
+  //      computeTargetPosition animation resumes from there.
+  //   2. Call localSeek() on the SDK so this tab's audio jumps without a
+  //      Web API round-trip (the slow path is ~300ms over a flaky network;
+  //      the SDK call is ~10ms).
+  //   3. Emit playback:seek so the server records the new position and
+  //      fans it out to every other listener in the room.
+  //
+  // We deliberately DON'T await anything — the host shouldn't see any UI
+  // freeze, even briefly, when they drag the scrubber.
+  const onSeek = (positionMs: number) => {
+    if (!playback.trackUri) return;
+    setPlayback((cur) => ({
+      ...cur,
+      positionMs,
+      lastSyncAt: serverNow(),
+    }));
+    void localSeek(positionMs);
+    getSocket().emit("playback:seek", { roomId, positionMs });
+  };
+
   // Remove a single track from the upcoming queue. Server authorizes:
   // only the user who added it OR a host/cohost can remove. We optimistically
   // drop it from local state so the row vanishes immediately — if the server
@@ -524,6 +594,8 @@ export function RoomPlayer({
       lastAppliedRef.current = {
         trackUri: playback.trackUri,
         isPlaying: playback.isPlaying,
+        positionMs: target,
+        lastSyncAt: playback.lastSyncAt,
       };
     } catch (e) {
       console.warn("[room-player] retry playTrackOnDevice failed:", e);
@@ -547,6 +619,8 @@ export function RoomPlayer({
       lastAppliedRef.current = {
         trackUri: playback.trackUri,
         isPlaying: playback.isPlaying,
+        positionMs: target,
+        lastSyncAt: playback.lastSyncAt,
       };
     } catch (e) {
       console.warn("[room-player] arm-audio play failed:", e);
@@ -592,6 +666,7 @@ export function RoomPlayer({
           onPlay={onPlay}
           onPause={onPause}
           onSkip={onSkip}
+          onSeek={isHost ? onSeek : undefined}
         />
         <ReactionsOverlay event={reactionEvent} />
       </div>
