@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Play, Pause, SkipForward, Music } from "lucide-react";
+import { Play, Pause, SkipForward, Music, X } from "lucide-react";
 import type { PlaybackState, QueueItemDTO } from "@/lib/socket";
 import { computeTargetPosition } from "@/lib/socket";
 
@@ -133,9 +133,19 @@ export function NowPlaying({
 export function QueueList({
   items,
   currentTrackUri,
+  meId,
+  isHost,
+  onRemove,
 }: {
   items: QueueItemDTO[];
   currentTrackUri: string | null;
+  // The current user's id. Used to gate the remove button: you can always
+  // remove a track YOU added; only the host can remove tracks added by others.
+  // (The server enforces the same rule — this is purely cosmetic, so the X
+  // button doesn't appear next to rows where the click would be 403'd.)
+  meId?: string | null;
+  isHost?: boolean;
+  onRemove?: (queueItemId: string) => void;
 }) {
   const upcoming = items.filter((q) => q.trackUri !== currentTrackUri);
   if (upcoming.length === 0) {
@@ -147,29 +157,49 @@ export function QueueList({
   }
   return (
     <ul className="space-y-1">
-      {upcoming.map((q) => (
-        <li
-          key={q.id}
-          className="flex items-center gap-3 rounded-lg px-2 py-1.5"
-        >
-          {q.albumArtUrl ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={q.albumArtUrl}
-              alt=""
-              className="h-9 w-9 rounded object-cover"
-            />
-          ) : (
-            <div className="grid h-9 w-9 place-items-center rounded bg-white/5">
-              <Music className="h-3.5 w-3.5 text-white/40" />
+      {upcoming.map((q) => {
+        // Optimistic placeholders use ids like "opt-1" — we deliberately don't
+        // expose remove for those because the server hasn't minted a real
+        // queueItemId yet and "queue:remove" with an opt-… id would 404.
+        const isOptimistic = q.id.startsWith("opt-");
+        const canRemove =
+          !!onRemove &&
+          !isOptimistic &&
+          (isHost || (meId != null && q.addedById === meId));
+        return (
+          <li
+            key={q.id}
+            className="group flex items-center gap-3 rounded-lg px-2 py-1.5 hover:bg-white/[0.03] transition-colors"
+          >
+            {q.albumArtUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={q.albumArtUrl}
+                alt=""
+                className="h-9 w-9 rounded object-cover"
+              />
+            ) : (
+              <div className="grid h-9 w-9 place-items-center rounded bg-white/5">
+                <Music className="h-3.5 w-3.5 text-white/40" />
+              </div>
+            )}
+            <div className="min-w-0 flex-1">
+              <div className="text-sm truncate">{q.trackName}</div>
+              <div className="text-xs text-white/45 truncate">{q.artistName}</div>
             </div>
-          )}
-          <div className="min-w-0 flex-1">
-            <div className="text-sm truncate">{q.trackName}</div>
-            <div className="text-xs text-white/45 truncate">{q.artistName}</div>
-          </div>
-        </li>
-      ))}
+            {canRemove && (
+              <button
+                onClick={() => onRemove?.(q.id)}
+                className="grid h-7 w-7 place-items-center rounded-md text-white/35 opacity-0 group-hover:opacity-100 hover:text-rose-300 hover:bg-rose-400/10 transition-all focus:opacity-100"
+                title="Remove from queue"
+                aria-label="Remove from queue"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </li>
+        );
+      })}
     </ul>
   );
 }

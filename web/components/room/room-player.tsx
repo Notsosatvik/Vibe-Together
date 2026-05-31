@@ -26,6 +26,13 @@ import {
 } from "@/lib/socket";
 import { SearchPanel, type OptimisticTrack } from "./search-panel";
 import { NowPlaying, QueueList } from "./now-playing";
+import { ReactionsOverlay } from "./reactions-overlay";
+
+// The emoji set offered in the room's reaction bar. Keep this short — too many
+// choices and the bar wraps awkwardly on mobile. 🔥 and 💣 are the two the
+// user explicitly asked for; the rest cover the usual "this slaps / I'm dead /
+// pretty / cute" reactions you'd see in a live listening session.
+const REACTION_EMOJIS = ["🔥", "💣", "🎉", "❤️", "😂", "👀", "💀", "✨"] as const;
 
 type SocketStatus =
   | { kind: "connecting" }
@@ -44,11 +51,16 @@ type SocketStatus =
 export function RoomPlayer({
   roomId,
   isHost,
+  meId,
   initialPlayback,
   initialQueue,
 }: {
   roomId: string;
   isHost: boolean;
+  // The current viewer's user id. Used to gate per-row queue actions (e.g.
+  // listeners can remove tracks THEY added, but not anyone else's). Optional
+  // because the room can briefly render before /me has resolved.
+  meId?: string | null;
   initialPlayback: PlaybackState;
   initialQueue: QueueItemDTO[];
 }) {
@@ -114,6 +126,15 @@ export function RoomPlayer({
   // the tab. We track this so the "Tap to start audio" button can hide
   // itself once the gesture has happened.
   const [audioArmed, setAudioArmed] = useState(false);
+
+  // Most recent emoji to spawn in the floating reactions overlay. Bumped
+  // both by local clicks (instant feedback) and by inbound socket events
+  // (other users' reactions). Counter id is monotonic so even repeated
+  // taps of the same emoji produce a fresh animation.
+  const [reactionEvent, setReactionEvent] = useState<{
+    id: number;
+    emoji: string;
+  } | null>(null);
 
   // -------------------------------------------------------------------------
   // Socket lifecycle
@@ -197,6 +218,15 @@ export function RoomPlayer({
     sock.on("queue:update", onQueue);
     sock.on("playback:tick", onTick);
 
+    // Server fans out reaction:fire to everyone in the room (including the
+    // sender). We bump a monotonic counter and forward it to the overlay —
+    // the overlay spawns one floating emoji per event id, so two people
+    // tapping 🔥 simultaneously produce two emojis, not one.
+    const onReaction = ({ emoji }: { userId: string; emoji: string; atMs: number }) => {
+      setReactionEvent((prev) => ({ id: (prev?.id ?? 0) + 1, emoji }));
+    };
+    sock.on("reaction:fire", onReaction);
+
     return () => {
       if (joinTimer) window.clearTimeout(joinTimer);
       sock.off("connect", onJoin);
@@ -205,6 +235,7 @@ export function RoomPlayer({
       sock.off("playback:state", onState);
       sock.off("queue:update", onQueue);
       sock.off("playback:tick", onTick);
+      sock.off("reaction:fire", onReaction);
       sock.emit("room:leave", { roomId });
     };
   }, [roomId]);
@@ -409,6 +440,28 @@ export function RoomPlayer({
     });
   };
 
+  // Remove a single track from the upcoming queue. Server authorizes:
+  // only the user who added it OR a host/cohost can remove. We optimistically
+  // drop it from local state so the row vanishes immediately — if the server
+  // rejects (rare; user would have to race their own permissions), the next
+  // queue:update broadcast will put it back.
+  const onRemoveFromQueue = (queueItemId: string) => {
+    if (queueItemId.startsWith("opt-")) return; // placeholder; server doesn't know it yet
+    getSocket().emit("queue:remove", { roomId, queueItemId });
+    setQueue((prev) => prev.filter((q) => q.id !== queueItemId));
+  };
+
+  // Fire an emoji reaction to the whole room. We update local overlay
+  // synchronously so the sender sees their own emoji float up instantly,
+  // and ALSO emit reaction:fire to the server. The server then broadcasts
+  // to everyone (including us); our socket listener will spawn another
+  // emoji from that broadcast. That's fine — two emojis is better feedback
+  // than waiting 200ms for the round-trip and showing one.
+  const onReact = (emoji: string) => {
+    setReactionEvent((prev) => ({ id: (prev?.id ?? 0) + 1, emoji }));
+    getSocket().emit("reaction:fire", { roomId, emoji, atMs: Date.now() });
+  };
+
   // Manual retry button for the playback-error banner. Just nudges the
   // mirroring effect — clearing lastApplied makes the next render re-issue
   // the play command using the latest projected server position.
@@ -485,14 +538,22 @@ export function RoomPlayer({
 
       {isHost && !hasTrack && <SearchPanel onAdd={onAddToQueue} />}
 
-      <NowPlaying
-        playback={playback}
-        currentTrack={currentTrack}
-        isHost={isHost}
-        onPlay={onPlay}
-        onPause={onPause}
-        onSkip={onSkip}
-      />
+      {/* `relative` is load-bearing — ReactionsOverlay positions itself
+          absolute inset-0 within this container so emojis float up out of
+          the now-playing card, not out of the viewport. */}
+      <div className="relative">
+        <NowPlaying
+          playback={playback}
+          currentTrack={currentTrack}
+          isHost={isHost}
+          onPlay={onPlay}
+          onPause={onPause}
+          onSkip={onSkip}
+        />
+        <ReactionsOverlay event={reactionEvent} />
+      </div>
+
+      <ReactionBar onReact={onReact} />
 
       {isHost && hasTrack && <SearchPanel onAdd={onAddToQueue} />}
 
@@ -505,7 +566,42 @@ export function RoomPlayer({
             {Math.max(0, queue.length - (currentTrack ? 1 : 0))} in queue
           </div>
         </div>
-        <QueueList items={queue} currentTrackUri={playback.trackUri} />
+        <QueueList
+          items={queue}
+          currentTrackUri={playback.trackUri}
+          meId={meId}
+          isHost={isHost}
+          onRemove={onRemoveFromQueue}
+        />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Horizontal strip of emoji buttons. Everyone in the room (host or listener)
+ * can tap any emoji to broadcast a floating reaction to everyone else's
+ * screens. Local feedback is instant because room-player triggers the
+ * overlay synchronously *before* the server round-trip.
+ */
+function ReactionBar({ onReact }: { onReact: (emoji: string) => void }) {
+  return (
+    <div className="rounded-2xl border border-white/8 bg-white/[0.025] p-3">
+      <div className="mb-2 px-1 text-[11px] uppercase tracking-wider text-white/50">
+        React
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5">
+        {REACTION_EMOJIS.map((emoji) => (
+          <button
+            key={emoji}
+            onClick={() => onReact(emoji)}
+            className="grid h-10 w-10 place-items-center rounded-xl bg-white/[0.04] hover:bg-white/[0.10] active:bg-white/[0.16] active:scale-95 transition-all text-xl border border-white/8 hover:border-white/20 select-none"
+            aria-label={`React with ${emoji}`}
+            title={`React with ${emoji}`}
+          >
+            <span aria-hidden>{emoji}</span>
+          </button>
+        ))}
       </div>
     </div>
   );

@@ -292,6 +292,7 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
               <RoomPlayer
                 roomId={room.id}
                 isHost={isHost}
+                meId={me?.id ?? null}
                 initialPlayback={{
                   trackUri:
                     room.queueItems.find((q) => q.position === 1)?.trackUri ?? null,
