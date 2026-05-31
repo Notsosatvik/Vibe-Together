@@ -19,9 +19,10 @@
 export const LEGAL_APP_NAME = "VibeTogether" as const;
 export const LEGAL_APP_URL = "https://vibe-together.vercel.app" as const;
 
-// FIXME: replace with your legal name or registered entity before sending the
-// Spotify Extension Request for review.
-export const LEGAL_OPERATOR_NAME = "Sonali Bhardwaj" as const;
+// The legal operator behind VibeTogether. Replace if you incorporate an
+// entity later (e.g. "VibeTogether Labs LLC") — Spotify wants to know who
+// they're contracting with.
+export const LEGAL_OPERATOR_NAME = "Satwik Handa" as const;
 
 // FIXME: replace with a real, monitored address. Gmail / personal addresses
 // are fine — Spotify just wants a reachable contact for data requests. If you
