@@ -20,6 +20,14 @@ type SpotifyPlayerLike = {
   disconnect: () => void;
   addListener: (event: string, cb: (data: unknown) => void) => void;
   togglePlay: () => Promise<void>;
+  // Local SDK controls — these talk directly to the SDK's audio element
+  // in the same browser tab, no Spotify Web API call, no network round
+  // trip. Each one returns in ~10ms vs ~300ms+ for the equivalent
+  // PUT /v1/me/player/{pause,play,seek}. We use them for everything
+  // except starting a *new* track URI (no SDK equivalent for that).
+  pause: () => Promise<void>;
+  resume: () => Promise<void>;
+  seek: (positionMs: number) => Promise<void>;
   getCurrentState: () => Promise<SpotifyPlayerState | null>;
   // Spotify-provided escape hatch from the browser autoplay policy. The SDK
   // internally creates an <audio> element on `connect()`, and most browsers
@@ -333,7 +341,65 @@ export function useSpotifyPlayer(
     }
   }, []);
 
-  return { status, deviceId, error, getCurrentState, activate };
+  // -------------------------------------------------------------------------
+  // Local SDK controls — fast paths that bypass the Spotify Web API.
+  // -------------------------------------------------------------------------
+  // For pause / same-track resume / seek, the Web API path
+  // (PUT /v1/me/player/{pause,play,seek}) costs a full TLS round trip to
+  // Spotify (~150–400ms) AND, in the case of /play, re-establishes the HLS
+  // stream from the requested position — which the user hears as a fresh
+  // buffer pause every time they click. These three wrappers call straight
+  // into the SDK that's already running locally in this tab, returning in
+  // single-digit ms with no audible buffer.
+  //
+  // Each returns `true` if the call was dispatched, `false` if the player
+  // isn't ready yet so the caller can fall back to the Web API path.
+  const localPause = useCallback(async (): Promise<boolean> => {
+    const p = playerRef.current;
+    if (!p) return false;
+    try {
+      await p.pause();
+      return true;
+    } catch (e) {
+      console.warn("[spotify-player] local pause failed:", e);
+      return false;
+    }
+  }, []);
+
+  const localResume = useCallback(async (): Promise<boolean> => {
+    const p = playerRef.current;
+    if (!p) return false;
+    try {
+      await p.resume();
+      return true;
+    } catch (e) {
+      console.warn("[spotify-player] local resume failed:", e);
+      return false;
+    }
+  }, []);
+
+  const localSeek = useCallback(async (positionMs: number): Promise<boolean> => {
+    const p = playerRef.current;
+    if (!p) return false;
+    try {
+      await p.seek(Math.max(0, Math.floor(positionMs)));
+      return true;
+    } catch (e) {
+      console.warn("[spotify-player] local seek failed:", e);
+      return false;
+    }
+  }, []);
+
+  return {
+    status,
+    deviceId,
+    error,
+    getCurrentState,
+    activate,
+    localPause,
+    localResume,
+    localSeek,
+  };
 }
 
 /**

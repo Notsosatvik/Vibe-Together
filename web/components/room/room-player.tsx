@@ -117,6 +117,9 @@ export function RoomPlayer({
     error: playerError,
     getCurrentState,
     activate,
+    localPause,
+    localResume,
+    localSeek,
   } = useSpotifyPlayer(true, { onTrackEnded: handleTrackEnded });
 
   // Have we successfully primed the SDK's <audio> element with a user
@@ -243,6 +246,15 @@ export function RoomPlayer({
   // -------------------------------------------------------------------------
   // Mirror canonical playback into this tab's Spotify Web Playback SDK
   // -------------------------------------------------------------------------
+  // Two fast paths and one slow path:
+  //   - pause:           local SDK call (player.pause)        ~10ms
+  //   - same-track resume: local SDK call (player.resume)     ~10ms
+  //   - new track (or recovery): Web API PUT /me/player/play  ~150–400ms
+  //
+  // Falling back to the Web API for "new track" is unavoidable — the SDK has
+  // no method that accepts a URI. Doing it for pause / resume would needlessly
+  // round-trip Spotify and, in the case of /play, re-buffer the audio (which
+  // the user hears as a click then silence then sound).
   useEffect(() => {
     if (!deviceId || playerStatus !== "ready") return;
     if (!playback.trackUri) return;
@@ -250,9 +262,9 @@ export function RoomPlayer({
     const trackChanged = playback.trackUri !== lastAppliedRef.current.trackUri;
     const playStateChanged = playback.isPlaying !== lastAppliedRef.current.isPlaying;
 
-    if (trackChanged || (playback.isPlaying && playStateChanged)) {
-      // New track OR transitioning to playing — start playback from the
-      // currently projected server position.
+    if (trackChanged) {
+      // Brand-new track URI — only the Web API can switch tracks. This is
+      // the path that costs the unavoidable ~300ms + Spotify CDN buffer.
       const target = computeTargetPosition(playback);
       playTrackOnDevice(deviceId, playback.trackUri, target)
         .then(() => setPlaybackError(null))
@@ -269,18 +281,43 @@ export function RoomPlayer({
         });
       lastAppliedRef.current = {
         trackUri: playback.trackUri,
+        isPlaying: playback.isPlaying,
+      };
+    } else if (playback.isPlaying && playStateChanged) {
+      // Same track, paused → playing. Resume the SDK locally. No buffer hit.
+      // If the SDK isn't ready (transient race), fall back to the Web API.
+      void (async () => {
+        const ok = await localResume();
+        if (!ok) {
+          const target = computeTargetPosition(playback);
+          playTrackOnDevice(deviceId, playback.trackUri!, target).catch((e) =>
+            console.warn("[room-player] fallback play after localResume failed:", e),
+          );
+        } else {
+          setPlaybackError(null);
+        }
+      })();
+      lastAppliedRef.current = {
+        trackUri: playback.trackUri,
         isPlaying: true,
       };
     } else if (!playback.isPlaying && playStateChanged) {
-      pausePlayback(deviceId).catch((e) =>
-        console.warn("[room-player] pausePlayback failed:", e),
-      );
+      // Playing → paused. Local SDK pause; fall back to Web API if SDK isn't
+      // ready (very rare since we already gated on playerStatus === "ready").
+      void (async () => {
+        const ok = await localPause();
+        if (!ok) {
+          pausePlayback(deviceId).catch((e) =>
+            console.warn("[room-player] fallback pause failed:", e),
+          );
+        }
+      })();
       lastAppliedRef.current = {
         trackUri: playback.trackUri,
         isPlaying: false,
       };
     }
-  }, [deviceId, playerStatus, playback]);
+  }, [deviceId, playerStatus, playback, localPause, localResume]);
 
   // -------------------------------------------------------------------------
   // Periodic drift correction.
@@ -315,14 +352,20 @@ export function RoomPlayer({
           console.info(
             `[room-player] drift=${Math.round(drift)}ms — seeking to ${target}ms`,
           );
-          void seekPlayback(deviceId, target);
+          // Prefer the SDK's local seek (no network, no audible buffer
+          // glitch). Fall back to the Web API seek only if the SDK seek
+          // failed to dispatch.
+          const ok = await localSeek(target);
+          if (!ok) {
+            void seekPlayback(deviceId, target);
+          }
         }
       } catch (e) {
         console.warn("[room-player] drift check failed:", e);
       }
     }, 4000);
     return () => window.clearInterval(interval);
-  }, [deviceId, playerStatus, playback.isPlaying, playback.trackUri, getCurrentState]);
+  }, [deviceId, playerStatus, playback.isPlaying, playback.trackUri, getCurrentState, localSeek]);
 
   // -------------------------------------------------------------------------
   // Host actions — emit socket events AND optimistically update local state.
