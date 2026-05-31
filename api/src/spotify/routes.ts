@@ -16,24 +16,33 @@ const crossSiteCookie = {
   path: "/",
 };
 
+// Scopes we ask the user to grant on /connect. Trimmed to the *minimum* set
+// the app actually exercises — this list is what Spotify's Extension Request
+// reviewers cross-check against the feature recording. Every scope here must
+// be justifiable; unjustified scopes are the most common rejection reason.
+//
+//   streaming                       — required to instantiate the Web Playback SDK
+//   user-read-email                 — match Spotify account to our user record
+//   user-read-private               — read display_name, country, and product tier
+//                                     (we gate hosting on product === "premium")
+//   user-modify-playback-state      — send play/pause/seek to the user's device;
+//                                     this is the core of synchronized listening
+//   playlist-read-private           — list the user's own private playlists in
+//                                     the "Add from playlist" picker
+//   playlist-read-collaborative     — same, for collaborative playlists they
+//                                     participate in
+//
+// Scopes we deliberately do NOT request: user-read-playback-state and
+// user-read-currently-playing (we drive playback, we don't poll it),
+// user-library-read / user-read-recently-played / user-top-read (no features
+// surface those yet).
 const SPOTIFY_SCOPES = [
   "streaming",
   "user-read-email",
   "user-read-private",
-  "user-read-playback-state",
   "user-modify-playback-state",
-  "user-read-currently-playing",
-  // playlist-read-private gates access to the user's *own* private playlists,
-  // playlist-read-collaborative is required separately for the (very common)
-  // case of collaborative playlists. Missing the latter is what produces the
-  // "Spotify: Forbidden" 403 on /v1/playlists/{id}/tracks for shared playlists.
   "playlist-read-private",
   "playlist-read-collaborative",
-  // Liked Songs — handy for the playlists tab even though we don't surface
-  // it as its own pseudo-playlist yet.
-  "user-library-read",
-  "user-read-recently-played",
-  "user-top-read",
 ].join(" ");
 
 // Kick off Spotify OAuth — user is already signed in with Google.
@@ -97,13 +106,12 @@ spotifyRouter.get("/connect", (req, res, next) => {
     state: encoded,
     // Force Spotify to show the consent dialog on every connect. Without this,
     // Spotify silently auto-redirects with the user's *prior* scope grant when
-    // they've connected before — which means if we ever add a new scope (we
-    // recently added playlist-read-collaborative and user-library-read), an
-    // existing user clicking "Reconnect" gets a fresh access/refresh token
-    // that's *still missing the new scopes*. That manifests as a permanent
-    // 403 Forbidden loop on the affected endpoints (e.g. collaborative
-    // playlist tracks). Forcing the dialog adds one extra click but
-    // guarantees the new scopes are actually granted.
+    // they've connected before — which means if we ever change the scope set
+    // (e.g. when we added playlist-read-collaborative), an existing user
+    // clicking "Reconnect" gets a fresh access/refresh token that's *still
+    // missing the new scopes*. That manifests as a permanent 403 Forbidden
+    // loop on the affected endpoints. Forcing the dialog adds one extra click
+    // but guarantees the new scopes are actually granted.
     show_dialog: "true",
   });
   res.redirect(`https://accounts.spotify.com/authorize?${params.toString()}`);
@@ -304,7 +312,7 @@ export async function refreshSpotifyTokenForUser(
   // to see what scopes a given user actually has.
   if (tokens.scope) {
     const granted = tokens.scope.split(" ").filter(Boolean);
-    const missing = ["playlist-read-collaborative", "user-library-read"].filter(
+    const missing = ["playlist-read-collaborative"].filter(
       (s) => !granted.includes(s),
     );
     if (missing.length > 0) {
